@@ -209,13 +209,15 @@ export const CAMERA_FIXTURES: CameraFixture[] = [
     channels: G6_PRO_ENTRY_CHANNELS,
 
     driftNarrative: "Native 20fps, not in {15,24,30}, so every advertised entry normalizes to 24fps. Portrait 3024x4096 reads 4:3 (tolerance) and advertises portrait " +
-      "HomeKit sizes. Package Camera channel filtered out.",
+      "HomeKit sizes, including Apple's 3:4 tiers (1536x2048, 1200x1600). Package Camera channel filtered out.",
     expected: [
 
       { channelId: 0, lens: undefined, name: "3024x4096@20fps (High)", resolution: [ 3024, 4096, 24 ], url: fixtureUrl(0) },
       { channelId: 0, lens: undefined, name: "3024x4096@20fps (High)", resolution: [ 2880, 3840, 24 ], url: fixtureUrl(0) },
       { channelId: 1, lens: undefined, name: "1440x1920@20fps (Medium)", resolution: [ 1920, 2560, 24 ], url: fixtureUrl(1) },
+      { channelId: 1, lens: undefined, name: "1440x1920@20fps (Medium)", resolution: [ 1536, 2048, 24 ], url: fixtureUrl(1) },
       { channelId: 1, lens: undefined, name: "1440x1920@20fps (Medium)", resolution: [ 1440, 1920, 24 ], url: fixtureUrl(1) },
+      { channelId: 1, lens: undefined, name: "1440x1920@20fps (Medium)", resolution: [ 1200, 1600, 24 ], url: fixtureUrl(1) },
       { channelId: 1, lens: undefined, name: "1440x1920@20fps (Medium)", resolution: [ 960, 1280, 24 ], url: fixtureUrl(1) },
       { channelId: 2, lens: undefined, name: "480x640@20fps (Low)", resolution: [ 768, 1024, 24 ], url: fixtureUrl(2) },
       { channelId: 2, lens: undefined, name: "480x640@20fps (Low)", resolution: [ 480, 640, 24 ], url: fixtureUrl(2) },

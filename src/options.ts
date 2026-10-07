@@ -236,6 +236,7 @@ export const featureOptions: Record<string, FeatureOptionEntry<ProtectOptionMeta
     { default: true, defaultValue: 0, description: "Top offset of the crop window, as a percentage of the original image height.", group: "Crop", name: "Crop.Y" },
     { default: true, defaultValue: 100, description: "Width of the crop window, as a percentage of original image width.", group: "Crop", name: "Crop.Width" },
     { default: true, defaultValue: 100, description: "Height of the crop window, as a percentage of original image height.", group: "Crop", name: "Crop.Height" },
+    { default: false, description: "For portrait-oriented cameras (e.g. doorbells), when HomeKit requests a landscape livestream, crop it to fill the landscape player instead of showing the full portrait image with black bars on either side. This zooms in and cuts off the top and bottom of the image.", name: "Portrait.Fill" },
     { default: true, description: "Enable higher quality snapshots.", name: "HighResSnapshots" }
   ],
 

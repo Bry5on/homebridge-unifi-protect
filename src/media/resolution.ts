@@ -1,6 +1,7 @@
 import type { Nullable } from "homebridge-plugin-utils";
 import type { ProtectCameraChannelConfig } from "unifi-protect";
 import type { Resolution } from "homebridge";
+import { createHash } from "node:crypto";
 
 export interface ChannelProfile {
 
@@ -113,11 +114,23 @@ export function buildChannelProfile(channel: ProtectCameraChannelConfig, options
   return entry;
 }
 
+// Apple's 3:4 portrait streaming tiers (HomeKit Secure Video Open Source Compatibility Guide, "Minimum Requirements"): 1536x2048, 1200x1600, 960x1280, 480x640. The
+// swapped 4:3 table already covers 960x1280 and 480x640; these fill in the rest. 1200x1600 is also the native resolution of the Logitech Circle View Doorbell.
+export const PORTRAIT_3X4_TIERS: readonly (readonly [number, number])[] = [ [ 1536, 2048 ], [ 1200, 1600 ] ];
+
 export function resolutionTableFor(nativeTop: Resolution): readonly (readonly [number, number])[] {
 
-  const table = is4x3AspectRatio(nativeTop[0], nativeTop[1]) ? RESOLUTIONS_4X3 : RESOLUTIONS_16X9;
+  const is4x3 = is4x3AspectRatio(nativeTop[0], nativeTop[1]);
+  const table = is4x3 ? RESOLUTIONS_4X3 : RESOLUTIONS_16X9;
 
-  return isPortraitResolution(nativeTop[0], nativeTop[1]) ? table.map(([ width, height ]) => [ height, width ] as const) : table;
+  if(!isPortraitResolution(nativeTop[0], nativeTop[1])) {
+
+    return table;
+  }
+
+  const portrait = table.map(([ width, height ]) => [ height, width ] as const);
+
+  return is4x3 ? [ ...portrait, ...PORTRAIT_3X4_TIERS ].sort((a, b) => (b[1] - a[1])) : portrait;
 }
 
 export function isMandatedOrUnderTop(candidate: Resolution, currentTop: Resolution): boolean {
@@ -287,4 +300,77 @@ export function buildAdvertisedResolutions(options: { fpsSet: readonly number[];
   }
 
   return validResolutions;
+}
+
+// A crop rectangle expressed as fractions of the source frame, matching the shape FfmpegOptions expects for its crop configuration.
+export interface CropFraction {
+
+  height: number;
+  width: number;
+  x: number;
+  y: number;
+}
+
+// The live-transcode output plan for a portrait source answering a landscape HomeKit request.
+export interface PortraitLiveOutput {
+
+  // The crop applied ahead of the scaler, or null when the full portrait frame is sent (pillarboxed by the Home app).
+  crop: Nullable<CropFraction>;
+
+  // The height handed to the encoder's scaler (scale_vt=-2:min(ih\,height)). The scaler caps this at the (cropped) source height.
+  height: number;
+
+  // The expected output dimensions after cropping and scaling, for logging.
+  outputHeight: number;
+  outputWidth: number;
+}
+
+// Plan the live-transcode output for a portrait camera. HomeKit clients typically request landscape resolutions even when we advertise portrait ones, and the Home
+// app aspect-fits whatever frame we send into its player. FfmpegOptions scales by height only (scale=-2:min(ih\,requestHeight)), so a
+// 1504x2016 source answering a 640x360 request becomes a 268x360 frame: the Home app pillarboxes it (~29% black bars each side) and upscales a tiny image.
+//
+// We do two things for a portrait source and a landscape request:
+//
+//   fill = true   Crop the source (full width, vertically centered) to the requested aspect ratio before scaling, so the frame fills the landscape player with no bars.
+//   fill = false  Keep the full portrait frame (Home app pillarboxes it), but scale it to a useful height instead of the requested height.
+//
+// In both cases the scaler target height is max(requested height, minHeight), and the scaler itself caps it at the source (or cropped) height, so we never upscale.
+// When HomeKit requests a portrait resolution (one of the portrait sizes we advertise), we never crop, but still apply the same height floor. Returns null when the
+// source isn't portrait, in which case the caller keeps the stock behavior.
+export function planPortraitLiveOutput(options: { fill: boolean; minHeight: number; request: { height: number; width: number };
+  source: { height: number; width: number }; }): Nullable<PortraitLiveOutput> {
+
+  const { fill, minHeight, request, source } = options;
+
+  if((source.width <= 0) || (source.height <= 0) || (request.width <= 0) || (request.height <= 0) || !isPortraitResolution(source.width, source.height)) {
+
+    return null;
+  }
+
+  const height = Math.max(request.height, minHeight);
+  let crop: Nullable<CropFraction> = null;
+  let effectiveHeight = source.height;
+
+  if(fill && (request.width > request.height)) {
+
+    // Keep the full source width and take a vertically centered band whose aspect ratio matches the request.
+    const heightFraction = Math.min(1, (source.width * request.height) / (request.width * source.height));
+
+    crop = { height: heightFraction, width: 1, x: 0, y: (1 - heightFraction) / 2 };
+    effectiveHeight = Math.floor(source.height * heightFraction);
+  }
+
+  const outputHeight = Math.min(effectiveHeight, height);
+  const outputWidth = Math.max(2, Math.round((source.width * outputHeight) / (effectiveHeight * 2)) * 2);
+
+  return { crop, height, outputHeight, outputWidth };
+}
+
+// A short, stable tag derived from an advertised resolution list. HAP-NodeJS computes the accessory configuration number (c#) from the attribute database with every
+// characteristic VALUE stripped, so changing only the advertised resolutions (the value of Supported Video Stream Configuration) never bumps c#, and HomeKit controllers
+// can keep using a previously cached stream configuration. Folding this tag into the characteristic's description - which IS part of the hashed configuration - makes a
+// changed resolution list bump c# exactly once, prompting HomeKit to re-read the accessory database without changing any aid/iid.
+export function advertisedResolutionsTag(resolutions: readonly Resolution[]): string {
+
+  return createHash("sha1").update(JSON.stringify(resolutions)).digest("hex").slice(0, 8);
 }

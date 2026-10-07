@@ -113,6 +113,11 @@ export const PROTECT_RPI_GPU_MINIMUM = 128;
 // Bitrate, in kilobits per second, to use when transcoding to local clients.
 export const PROTECT_TRANSCODE_BITRATE = 2000;
 
+// Minimum output height, in pixels, for low-latency hardware-encoded livestreams from portrait-oriented cameras (e.g. doorbells). HomeKit clients typically request
+// landscape resolutions, and scaling a portrait source to the requested landscape height (e.g. 360) produces a tiny frame the Home app then upscales. The scaler
+// never upscales past the source, so this is a floor on quality, not a forced upscale.
+export const PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT = 1080;
+
 // Default interval, in hours, for scheduled NVR reboots when enabled.
 export const PROTECT_NVR_REBOOT_INTERVAL = 6;
 

@@ -9,10 +9,10 @@
  * serves, and then caches, a frozen image), that an EMPTY buffer declines SILENTLY (no staleness to claim), and that in both cases the chain moves past the buffer to the
  * next source. The freshness DECISION itself - whether the buffer reads fresh, stale, or empty - is covered directly over ProtectTimeshiftBuffer in timeshift.test.ts.
  */
+import { ProtectSnapshot, snapshotScaleFilters } from "./snapshot.ts";
 import type { TestCameraHost, TestLogEntry } from "../testing.helpers.ts";
 import { TestStreamingDelegate, makeTestCameraHost, makeTimeshiftSupervisorDouble, settle } from "../testing.helpers.ts";
 import { after, describe, test } from "node:test";
-import { ProtectSnapshot } from "./snapshot.ts";
 import type { StreamingDelegate } from "./stream-delegate.ts";
 import assert from "node:assert/strict";
 
@@ -128,5 +128,22 @@ describe("ProtectSnapshot package-camera source ordering", () => {
     assert.equal(controllerCalls.length, 1, "the controller source was tried exactly once");
     assert.equal(controllerCalls[0]?.packageCamera, true, "the controller request carried the package flag");
     assert.equal(selectCalls.count, 0, "the package ordering left the RTSP source untouched");
+  });
+});
+
+describe("snapshotScaleFilters: portrait sources keep their native aspect ratio (no baked-in pillarbox)", () => {
+
+  test("landscape sources keep the fit-and-pad behavior", () => {
+
+    assert.deepEqual(snapshotScaleFilters({ height: 360, width: 640 }, false),
+      [ "scale=640:360:force_original_aspect_ratio=decrease", "pad=640:360:(ow-iw)/2:(oh-ih)/2" ]);
+  });
+
+  test("portrait sources cover the requested box at native aspect, with no pad and square pixels", () => {
+
+    const filters = snapshotScaleFilters({ height: 360, width: 640 }, true);
+
+    assert.deepEqual(filters, [ "scale=w=min(iw\\, max(640\\, 360 * iw / ih)):h=-2", "setsar=1" ]);
+    assert.equal(filters.some((filter) => filter.startsWith("pad=")), false);
   });
 });

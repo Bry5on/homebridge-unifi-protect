@@ -1,6 +1,7 @@
 import { AI_PRO_CHANNELS, C5_WITNESS_CHANNELS, CAMERA_FIXTURES, FIXTURE_HOST, FIXTURE_RTSPS_PORT, G6_PRO_ENTRY_CHANNELS, MIXED_RTSP_DISABLED_CHANNELS, PACKAGE_FIXTURES,
   SANITY_FAIL_CHANNELS, makeChannel } from "../camera.fixtures.ts";
-import { buildAdvertisedProfiles, buildAdvertisedResolutions, buildChannelProfile, capByPixels, isPrimaryChannel, rtspUrl, selectChannelProfile } from "./resolution.ts";
+import { advertisedResolutionsTag, buildAdvertisedProfiles, buildAdvertisedResolutions, buildChannelProfile, capByPixels, isPrimaryChannel, planPortraitLiveOutput,
+  rtspUrl, selectChannelProfile } from "./resolution.ts";
 import { describe, test } from "node:test";
 import type { ChannelProfile } from "./resolution.ts";
 import type { Nullable } from "homebridge-plugin-utils";
@@ -235,5 +236,82 @@ describe("resolution: rtspUrl - the two scheme branches", () => {
     const channel = makeChannel({ fps: 30, height: 1080, id: 0, name: "High", width: 1920 });
 
     assert.equal(rtspUrl(channel, "h", 7447, false), "rtsp://h:7447/" + channel.rtspAlias);
+  });
+});
+
+describe("resolution: portrait livestream output planning (Doorbell Lite 1504x2016)", () => {
+
+  const source = { height: 2016, width: 1504 };
+
+  test("landscape sources keep the stock behavior", () => {
+
+    assert.equal(planPortraitLiveOutput({ fill: true, minHeight: 1080, request: { height: 360, width: 640 }, source: { height: 1080, width: 1920 } }), null);
+  });
+
+  test("portrait requests are never cropped, but still get the height floor", () => {
+
+    const plan = planPortraitLiveOutput({ fill: true, minHeight: 1080, request: { height: 640, width: 480 }, source });
+
+    assert.equal(plan?.crop, null);
+    assert.deepEqual([ plan?.outputWidth, plan?.outputHeight ], [ 806, 1080 ]);
+    assert.deepEqual([ planPortraitLiveOutput({ fill: false, minHeight: 0, request: { height: 1600, width: 1200 }, source })?.outputWidth,
+      planPortraitLiveOutput({ fill: false, minHeight: 0, request: { height: 1600, width: 1200 }, source })?.outputHeight ], [ 1194, 1600 ]);
+  });
+
+  test("fill crops a vertically centered band matching the request aspect and scales it up to the source-limited floor", () => {
+
+    const plan = planPortraitLiveOutput({ fill: true, minHeight: 1080, request: { height: 360, width: 640 }, source });
+
+    assert.ok(plan?.crop);
+    assert.equal(plan.crop.width, 1);
+    assert.equal(plan.crop.x, 0);
+    assert.ok(Math.abs(plan.crop.height - ((1504 * 9) / (16 * 2016))) < 1e-9);
+    assert.ok(Math.abs((plan.crop.y * 2) + plan.crop.height - 1) < 1e-9);
+    assert.equal(plan.height, 1080);
+    assert.deepEqual([ plan.outputWidth, plan.outputHeight ], [ 1504, 846 ]);
+  });
+
+  test("fill without a floor matches the requested dimensions exactly", () => {
+
+    const plan = planPortraitLiveOutput({ fill: true, minHeight: 0, request: { height: 360, width: 640 }, source });
+
+    assert.equal(plan?.height, 360);
+    assert.deepEqual([ plan?.outputWidth, plan?.outputHeight ], [ 640, 360 ]);
+  });
+
+  test("no fill keeps the full portrait frame but scales it to the floor instead of the requested height", () => {
+
+    const plan = planPortraitLiveOutput({ fill: false, minHeight: 1080, request: { height: 360, width: 640 }, source });
+
+    assert.equal(plan?.crop, null);
+    assert.equal(plan?.height, 1080);
+    assert.deepEqual([ plan?.outputWidth, plan?.outputHeight ], [ 806, 1080 ]);
+  });
+
+  test("the planned height never drops below the request and is capped at the source", () => {
+
+    assert.equal(planPortraitLiveOutput({ fill: false, minHeight: 1080, request: { height: 1440, width: 1920 }, source })?.outputHeight, 1440);
+    assert.equal(planPortraitLiveOutput({ fill: false, minHeight: 4000, request: { height: 360, width: 640 }, source })?.outputHeight, 2016);
+  });
+});
+
+describe("resolution: portrait advertisement (Doorbell Lite 1504x2016)", () => {
+
+  const channels: ProtectCameraChannelConfig[] = [makeChannel({ fps: 24, height: 2016, id: 0, name: "High", width: 1504 })];
+  const published = buildAdvertisedProfiles(nativeEntries(channels));
+  const dims = published.map((e) => e.resolution[0].toString() + "x" + e.resolution[1].toString());
+
+  test("advertises only portrait sizes, including Apple's 3:4 tier 1200x1600 (the Logitech Circle View Doorbell's native size)", () => {
+
+    assert.deepEqual(dims, [ "1504x2016", "1440x1920", "1200x1600", "960x1280", "768x1024", "480x640", "360x480", "240x320" ]);
+  });
+
+  test("the advertised-list tag is stable and changes when the list changes", () => {
+
+    const tag = advertisedResolutionsTag(published.map((e) => e.resolution));
+
+    assert.equal(tag, advertisedResolutionsTag(published.map((e) => e.resolution)));
+    assert.match(tag, /^[0-9a-f]{8}$/);
+    assert.notEqual(tag, advertisedResolutionsTag(published.slice(1).map((e) => e.resolution)));
   });
 });

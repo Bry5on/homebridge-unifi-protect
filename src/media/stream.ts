@@ -10,12 +10,13 @@ import { AudioRecordingCodecType, AudioRecordingSamplerate, AudioStreamingCodecT
   StreamRequestTypes, VideoCodecType, formatBps, formatErrorMessage, guardedDispatch, isHbpuAbortReason } from "homebridge-plugin-utils";
 import type { CameraController, CameraControllerOptions, CameraStreamingDelegate, HAP, PrepareStreamCallback, PrepareStreamRequest, PrepareStreamResponse, Resolution,
   Service, SnapshotRequest, SnapshotRequestCallback, StartStreamRequest, StreamRequestCallback, StreamingRequest } from "homebridge";
+import type { ChannelProfile, CropFraction, PortraitLiveOutput } from "./resolution.ts";
 import type { HomebridgePluginLogging, IpFamily, Nullable, PortReservation } from "homebridge-plugin-utils";
-import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_TIMESHIFT_BUFFER_MAXDURATION } from "../settings.ts";
+import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT, PROTECT_TIMESHIFT_BUFFER_MAXDURATION }
+  from "../settings.ts";
 import { ProtectAbortedError, livestreamAudioSampleRate } from "unifi-protect";
 import { ProtectReservedNames, isPackageCameraContext } from "../types.ts";
 import { guardedPublish, mqttTopic } from "../mqtt.ts";
-import type { ChannelProfile } from "./resolution.ts";
 import type { LivestreamSubscription } from "./livestream.ts";
 import type { ProtectCameraHost } from "./camera-host.ts";
 import type { ProtectNvr } from "../nvr/nvr.ts";
@@ -26,6 +27,7 @@ import { ProtectStreamingFfmpegProcess } from "./stream-ffmpeg-process.ts";
 import { ProtectTimeshiftSupervisor } from "./timeshift-supervisor.ts";
 import type { TalkbackSession } from "unifi-protect";
 import { logLivestreamIterationError } from "./livestream.ts";
+import { planPortraitLiveOutput } from "./resolution.ts";
 import { resolveSessionSource } from "./stream-source-policy.ts";
 import { streamingSamplerates } from "./stream-delegate.ts";
 
@@ -103,6 +105,9 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
   public readonly builtFor: AudioOptionsIdentity;
   public controller: CameraController;
   public readonly ffmpegOptions: FfmpegOptions;
+
+  // Livestream-only FFmpeg option sets carrying a portrait fill crop, keyed by the crop rectangle. HKSV recordings and snapshots never use these.
+  private readonly portraitFillOptions = new Map<string, FfmpegOptions>();
   private readonly hap: HAP;
   public hksv: Nullable<ProtectRecordingDelegate>;
   public readonly log: HomebridgePluginLogging;
@@ -666,6 +671,9 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
       }
     }
 
+    // The portrait livestream output plan, when the source is portrait. Null keeps the stock scale-to-requested-height behavior.
+    let portraitPlan: Nullable<PortraitLiveOutput> = null;
+
     // Find the best RTSP stream based on what we're looking for.
     if(isTranscoding) {
 
@@ -687,6 +695,20 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
       } else if(!isHighLatency && (this.protectCamera.hints.transcodeBitrate > 0)) {
 
         targetBitrate = this.protectCamera.hints.transcodeBitrate;
+      }
+
+      // Portrait cameras (e.g. doorbells): the stock height-only scale turns a 1504x2016 source into a 268x360 frame for a 640x360 request, which the Home app
+      // pillarboxes and upscales. Plan a larger output instead (and, when Video.Portrait.Fill is enabled and HomeKit asked for a landscape stream, a crop that fills
+      // the landscape player). A user-configured crop wins - we leave the stock behavior alone in that case.
+      if(channelProfile && !this.protectCamera.hints.crop) {
+
+        portraitPlan = planPortraitLiveOutput({
+
+          fill: this.protectCamera.hasFeature("Video.Portrait.Fill"),
+          minHeight: (usesHardwareEncoder && !isHighLatency) ? PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT : 0,
+          request: { height: request.video.height, width: request.video.width },
+          source: { height: channelProfile.channel.height, width: channelProfile.channel.width }
+        });
       }
 
       // If we're targeting a bitrate that's beyond the capabilities of our input channel, match the bitrate of the input channel.
@@ -824,6 +846,12 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
       formatBps(targetBitrate * 1000), channelProfile.name, this.protectCamera.videoCodecName,
       formatBps(channelProfile.channel.bitrate), useTsb ? "TSB/" + (this.protectCamera.hasFeature("Debug.Video.Timeshift.UseRtsp") ? "RTSP" : "API") : "RTSP");
 
+    if(portraitPlan) {
+
+      this.log.info("Portrait camera: sending %sx%s%s.", portraitPlan.outputWidth, portraitPlan.outputHeight,
+        portraitPlan.crop ? " (cropped to fill the landscape player)" : " (full portrait frame)");
+    }
+
     // When on high-performance hardware like Apple Silicon, using the TSB, and we don't have low-FPS cameras like the package camera, enable the use of the
     // CPU-intensive FFmpeg minterpolate filter to enable very smooth video, especially when there's motion involved. M3+ Apple Silicon environments are able to reliably
     // use this filter in realtime and with great results. I'm hoping to be able to enable this in the future for other platforms.
@@ -833,16 +861,26 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
     // Check to see if we're transcoding. If we are, set the right FFmpeg encoder options. If not, copy the video stream.
     if(isTranscoding) {
 
-      // Configure our video parameters for transcoding.
-      ffmpegArgs.push(...this.ffmpegOptions.streamEncoder({
+      // Configure our video parameters for transcoding. A portrait fill crop rides on a livestream-only FfmpegOptions instance so it sits ahead of the scaler (the same
+      // place a user-configured crop goes) without affecting HKSV recordings, which share this.ffmpegOptions.
+      const encoderOptions = portraitPlan?.crop ? this.portraitFillFfmpegOptions(portraitPlan.crop) : this.ffmpegOptions;
+
+      ffmpegArgs.push(...encoderOptions.streamEncoder({
 
         bitrate: targetBitrate,
-        fps: useInterpolationFilter ? channelProfile.channel.fps : request.video.fps,
-        height: request.video.height,
+        // A portrait session upsized beyond the request sends the camera's native frame rate when it's lower than requested (e.g. 24 instead of 30), rather than
+        // duplicating every fourth frame up to the requested rate, which makes motion judder.
+        fps: useInterpolationFilter ? channelProfile.channel.fps : (((portraitPlan && (portraitPlan.outputHeight > request.video.height)) &&
+          (channelProfile.channel.fps > 0)) ? Math.min(request.video.fps, channelProfile.channel.fps) : request.video.fps),
+        height: portraitPlan?.height ?? request.video.height,
         idrInterval: HOMEKIT_IDR_INTERVAL,
         inputFps: channelProfile.channel.fps,
         level: request.video.level,
         profile: request.video.profile,
+        // A portrait session upsized beyond the request (e.g. 806x1080 for 640x360) uses plain average-bitrate encoding, as HKSV recordings do. Quality-constrained
+        // mode (-q:v) chases a fixed visual quality under a hard one-second -maxrate cap; at the larger frame size that demand far exceeds the cap, so VideoToolbox
+        // starves or silently drops frames, which shows up in the Home app as a frozen, then choppy, live view.
+        ...((portraitPlan && (portraitPlan.outputHeight > request.video.height)) ? { smartQuality: false } : {}),
         // When interpolating, hand the encoder the fps and interpolation filters to smooth the presentation timestamps; it composes them into its own chain and bridges
         // any GPU-to-CPU download transfer itself.
         ...(useInterpolationFilter ? { videoFilters: [ "fps=" + request.video.fps.toString(),
@@ -1230,6 +1268,40 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
         }
       }
     }
+  }
+
+  // Return (creating once per crop rectangle) a livestream-only FfmpegOptions that applies a portrait fill crop ahead of the scaler. It inherits the already-validated
+  // hardware flags of our primary options, and its construction-time "hardware acceleration enabled" info line is suppressed since the primary instance logged it.
+  private portraitFillFfmpegOptions(crop: CropFraction): FfmpegOptions {
+
+    const key = [ crop.width, crop.height, crop.x, crop.y ].map((value) => value.toFixed(4)).join(":");
+    let options = this.portraitFillOptions.get(key);
+
+    if(!options) {
+
+      const log = this.log;
+
+      options = new FfmpegOptions({
+
+        codecSupport: this.platform.codecSupport,
+        crop: crop,
+        debug: this.platform.config.debugAll,
+        hardwareDecoding: this.ffmpegOptions.config.hardwareDecoding,
+        hardwareTranscoding: this.ffmpegOptions.config.hardwareTranscoding,
+        log: {
+
+          debug: (message: string, ...parameters: unknown[]): void => log.debug(message, ...parameters),
+          error: (message: string, ...parameters: unknown[]): void => log.error(message, ...parameters),
+          info: (): void => { /* Suppressed - see above. */ },
+          warn: (message: string, ...parameters: unknown[]): void => log.warn(message, ...parameters)
+        },
+        name: (): string => this.protectCamera.accessoryName
+      });
+
+      this.portraitFillOptions.set(key, options);
+    }
+
+    return options;
   }
 
   // Process incoming stream requests. HomeKit invokes this without awaiting; the START case is async (startStream), so the whole dispatch is routed through

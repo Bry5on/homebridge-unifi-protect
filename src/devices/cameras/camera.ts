@@ -9,7 +9,8 @@ import type { LivestreamHostOptions, ProtectCameraHost } from "../../media/camer
 import { PROTECT_FFMPEG_AUDIO_FILTER_FFTNR, PROTECT_SEGMENT_RESOLUTION, PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET } from "../../settings.ts";
 import type { ProtectAccessory, ProtectPersistedContextState, WithoutIdentity } from "../../types.ts";
 import { ProtectAuthorizationError, deviceSelectors, livestreamAudioSampleRate } from "unifi-protect";
-import { buildAdvertisedProfiles, buildChannelProfile, capByPixels, formatResolution, isPrimaryChannel, rtspUrl, selectChannelProfile } from "../../media/resolution.ts";
+import { advertisedResolutionsTag, buildAdvertisedProfiles, buildChannelProfile, capByPixels, formatResolution, isPortraitResolution, isPrimaryChannel, rtspUrl,
+  selectChannelProfile } from "../../media/resolution.ts";
 import { nightVisionActive, nightVisionBrightnessForMode, nightVisionCommandForLevel, nightVisionModeForToggleOn, nightVisionToggleCommand,
   parseNightVisionMode } from "./night-vision-policy.ts";
 import type { ChannelProfile } from "../../media/resolution.ts";
@@ -1333,10 +1334,65 @@ export class ProtectCamera extends ProtectDevice implements ProtectCameraHost {
     // Fire up the controller and inform HomeKit about it.
     this.accessory.configureController(this.stream.controller);
 
+    // Portrait cameras: make sure HomeKit actually re-reads our (portrait) advertised resolutions rather than a stream configuration it cached earlier.
+    this.tagPortraitStreamConfiguration();
+
     // Kick the supervisor so the standing timeshift buffer establishes for this camera's streaming arm, independent of any HomeKit Secure Video recording demand.
     void this.stream.timeshift?.reconcile();
 
     return true;
+  }
+
+  // HAP-NodeJS strips characteristic values when computing the configuration number (c#) HomeKit uses to decide whether to re-read an accessory's attribute database, so
+  // a change to the advertised resolutions alone (e.g. upgrading from a landscape list to the portrait list) is invisible to HomeKit controllers that cached the old
+  // stream configuration. For portrait cameras we fold a tag derived from the advertised list into the description of each Supported Video Stream Configuration
+  // characteristic. The description is part of the hashed configuration, so a changed list bumps c# once (debounced by HAP-NodeJS), without changing any aid/iid - no
+  // effect on HomeKit Secure Video history, automations, or room assignments.
+  private tagPortraitStreamConfiguration(): void {
+
+    const top = this.channelProfiles[0];
+
+    if(!top || !isPortraitResolution(top.channel.width, top.channel.height)) {
+
+      return;
+    }
+
+    const rtpService = this.hap.Service.CameraRTPStreamManagement as typeof this.hap.Service.CameraRTPStreamManagement | undefined;
+    const configCharacteristic =
+      this.hap.Characteristic.SupportedVideoStreamConfiguration as (typeof this.hap.Characteristic.SupportedVideoStreamConfiguration) | undefined;
+
+    if(!rtpService || !configCharacteristic) {
+
+      return;
+    }
+
+    const description = "Supported Video Stream Configuration " + advertisedResolutionsTag(this.channelProfiles.map((entry) => entry.resolution));
+
+    for(const service of this.accessory.services) {
+
+      if((service.UUID !== rtpService.UUID) || !service.testCharacteristic(configCharacteristic)) {
+
+        continue;
+      }
+
+      const characteristic = service.getCharacteristic(configCharacteristic);
+
+      if(characteristic.props.description === description) {
+
+        continue;
+      }
+
+      characteristic.setProps({ description: description });
+
+      // HAP-NodeJS doesn't re-evaluate the configuration number on setProps alone, so we signal a service configuration change, which its bridge debounces into a
+      // single re-evaluation (and, if the hashed configuration changed, a c# bump and a refreshed Bonjour advertisement).
+      service.emit("service-configurationChange");
+    }
+
+    if(this.hasFeature("Debug.Video.Startup")) {
+
+      this.log.info("Portrait camera: advertising %s.", this.channelProfiles.map((entry) => formatResolution(entry.resolution)).join(", "));
+    }
   }
 
   // Tear down this camera's streaming delegate and unregister its CameraController. Both cleanup (on deletion) and the audio-capability rebuild tear the delegate down
