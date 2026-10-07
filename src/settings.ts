@@ -82,8 +82,13 @@ export const PROTECT_HKSV_SHADOW_FLOOR_MS = PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_
 export const PROTECT_TIMESHIFT_BUFFER_MAXDURATION = PROTECT_LIVESTREAM_API_IDR_INTERVAL * 1000 * 2;
 
 // The channel-selection target for a pixel-constrained hardware encoder (such as a Raspberry Pi): the substrate channel policy picks the highest-quality channel at or
-// below this on such a host. Deliberately not named with "RESOLUTION" - in this file that word denotes the buffer's time-granularity, not a pixel dimension.
+// below this on such a host. Deliberately not named with "RESOLUTION" - in this file that word denotes the buffer's time-granularity, not a pixel dimension. Landscape is
+// the default; portrait cameras substitute PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET_PORTRAIT so the timeshift buffer keeps a High/Medium tier instead of collapsing to Low.
 export const PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET = { height: 1080, width: 1920 };
+
+// Portrait counterpart of PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET (1080x1920). Same megapixel budget, oriented so long-edge nearest matching on a portrait doorbell lands
+// on Medium (1440x1920) rather than treating landscape 1920x1080 as "wider than" every portrait channel width and falling through to Low.
+export const PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET_PORTRAIT = { height: 1920, width: 1080 };
 
 // Default port to use to publish an M3U playlist for use in other apps that can consume one to make camera livestreams available, such as Channels DVR.
 export const PROTECT_M3U_PLAYLIST_PORT = 10110;
@@ -138,7 +143,7 @@ export const PROTECT_NVR_REBOOT_DEFERRAL_MAX = 15 * 60;
 export const PROTECT_NVR_REBOOT_RECENCY_MS = 60000;
 
 // Minimum duration, in milliseconds, that the controller must be continuously available and healthy before the plugin will perform any destructive device
-// removal. A fixed safety floor (not user-configurable): no device is removed until the controller has been in a good state this long, so a freshly-recovered
+ // removal. A fixed safety floor (not user-configurable): no device is removed until the controller has been in a good state this long, so a freshly-recovered
 // or freshly-rebooted controller never triggers a removal while it is still settling and re-adopting its devices.
 export const PROTECT_NVR_REMOVAL_STABILITY_WINDOW = 600000;
 
