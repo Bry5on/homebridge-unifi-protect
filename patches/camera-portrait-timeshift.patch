@@ -1,0 +1,44 @@
+commit 2b1233e8b214d7ae019bbad668972392fd40d863
+Author: Bry5on <bryson@users.noreply.github.com>
+Date:   Tue Oct 6 23:12:04 2026 -0700
+
+    fix: portrait doorbell live-view black bars and low-res streams
+    
+    Near-4:3 sensors (e.g. G6 Pro Entry 3024x4096) now map to the 4:3 family
+    via aspect-ratio tolerance, advertise portrait HomeKit sizes when the
+    native top is upright, and select channels by long-edge nearest matching
+    so landscape 1280x720 probes no longer bind to Low 480x640. Constrained
+    Pi hosts use a portrait 1080x1920 substrate target for portrait cameras.
+
+diff --git a/src/devices/cameras/camera.ts b/src/devices/cameras/camera.ts
+index 4678ee0..14be565 100644
+--- a/src/devices/cameras/camera.ts
++++ b/src/devices/cameras/camera.ts
+@@ -6,7 +6,7 @@ import { AudioRecordingCodecType, AudioRecordingSamplerate, capabilityGate, form
+ import type { Camera, LivestreamSource, ProtectCameraConfig, SnapshotOptions, TalkbackSession } from "unifi-protect";
+ import type { CharacteristicValue, Service } from "homebridge";
+ import type { LivestreamHostOptions, ProtectCameraHost } from "../../media/camera-host.ts";
+-import { PROTECT_FFMPEG_AUDIO_FILTER_FFTNR, PROTECT_SEGMENT_RESOLUTION, PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET } from "../../settings.ts";
++import { PROTECT_FFMPEG_AUDIO_FILTER_FFTNR, PROTECT_SEGMENT_RESOLUTION, PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET, PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET_PORTRAIT } from "../../settings.ts";
+ import type { ProtectAccessory, ProtectPersistedContextState, WithoutIdentity } from "../../types.ts";
+ import { ProtectAuthorizationError, deviceSelectors, livestreamAudioSampleRate } from "unifi-protect";
+ import { buildAdvertisedProfiles, buildChannelProfile, capByPixels, formatResolution, isPrimaryChannel, rtspUrl, selectChannelProfile } from "../../media/resolution.ts";
+@@ -1834,11 +1834,15 @@ export class ProtectCamera extends ProtectDevice implements ProtectCameraHost {
+       return selectChannelProfile(entries, { mode: "name", name: this.hints.substrateDefault });
+     }
+ 
+-    // (2) A pixel-constrained encoder host: the highest-quality channel at or below the constrained target, biased downward and preference-free.
++    // (2) A pixel-constrained encoder host: the highest-quality channel at or below the constrained target, biased downward and preference-free. Portrait cameras use the
++    // portrait target so long-edge nearest matching keeps Medium/High instead of binding a landscape 1920x1080 probe to Low.
+     if(this.platform.codecSupport.hostSystem === "raspbian") {
+ 
+-      return selectChannelProfile(entries, { bias: "lower", height: PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET.height, mode: "nearest",
+-        width: PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET.width });
++      const top = entries[0];
++      const portrait = (top !== undefined) && (top.channel.width < top.channel.height);
++      const target = portrait ? PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET_PORTRAIT : PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET;
++
++      return selectChannelProfile(entries, { bias: "lower", height: target.height, mode: "nearest", width: target.width });
+     }
+ 
+     // (3) Otherwise, the highest-quality channel the host's encoder can consume - the first surviving entry, taken structurally with no name lookup.

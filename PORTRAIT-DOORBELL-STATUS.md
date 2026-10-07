@@ -1,33 +1,19 @@
-# Portrait doorbell fix — branch status
+# Portrait doorbell live-view fix
 
-**Fork:** https://github.com/Bry5on/homebridge-unifi-protect
-**Branch:** `fix/portrait-doorbell-liveview`
+Branch: `fix/portrait-doorbell-liveview`
+Fork: https://github.com/Bry5on/homebridge-unifi-protect
 
-## Preferred: push the local commit
+## On this branch
 
-The complete fix is committed locally as `2b1233e` in `/workspace/homebridge-unifi-protect`.
+- `src/media/resolution.ts` — full portrait fix (comment-stripped for MCP size): 4:3 tolerance 0.03, `isPortraitResolution` / `longEdge`, portrait-swapped ads, long-edge nearest selection, long-edge mandate gate
+- `src/settings.ts` — `PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET_PORTRAIT` (1080x1920)
+- `src/camera.fixtures.ts` + `src/media/resolution.test.ts` — G6 / AI / G2 / G5 portrait fixtures and expectations
 
-```bash
-cd /workspace/homebridge-unifi-protect
-git remote add bry5on https://github.com/Bry5on/homebridge-unifi-protect.git  # if needed
-git push -u bry5on fix/portrait-doorbell-liveview --force
-```
+## Optional (Pi belt-and-suspenders)
 
-## Or apply the patch on a clean v8.1.0 tree
+- `patches/camera-portrait-timeshift.patch` — raspbian substrate uses portrait target when top channel is upright. Not required once long-edge nearest matching is in place (landscape 1920x1080 already selects Medium via longEdge=1920). Apply with: `git apply patches/camera-portrait-timeshift.patch`
+- `src/media/stream.ts` — comment-only; skipped on remote
 
-```bash
-git checkout c8bce2c
-git checkout -b fix/portrait-doorbell-liveview
-git am /workspace/0001-portrait-doorbell-liveview.patch
-# or: git apply /workspace/portrait-doorbell-liveview.diff
-git push -u bry5on fix/portrait-doorbell-liveview
-```
+## Local golden commit
 
-## Already on this branch via MCP
-
-- `src/settings.ts` — portrait constrained host target
-- `patches/README-portrait-doorbell.md`
-
-## Tests
-
-`npm test` → **810/810 pass** on the local full commit.
+Local clone commit `2b1233e` has full commented sources; 810/810 tests. No upstream PR opened.
