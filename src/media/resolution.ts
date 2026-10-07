@@ -156,14 +156,36 @@ export function selectChannelProfile(entries: readonly ChannelProfile[], request
           (e.resolution[1] === request.height)) ?? exact;
       }
 
-      const requestLongEdge = longEdge(request.width, request.height);
+      const target = longEdge(request.width, request.height);
+      const entryRank = (entry: ChannelProfile): number => longEdge(entry.channel.width, entry.channel.height);
 
       if(request.bias === "lower") {
 
-        return entries.find((e) => (longEdge(e.channel.width, e.channel.height) < requestLongEdge)) ?? entries.at(-1) ?? null;
+        let best: ChannelProfile | null = null;
+        let bestDiff = Infinity;
+
+        for(const entry of entries) {
+
+          const diff = Math.abs(entryRank(entry) - target);
+
+          if(diff < bestDiff) {
+
+            bestDiff = diff;
+            best = entry;
+          }
+        }
+
+        return best;
       }
 
-      return entries.filter((e) => (longEdge(e.channel.width, e.channel.height) > requestLongEdge)).at(-1) ?? entries[0] ?? null;
+      const higher = entries.filter((e) => (entryRank(e) > target)).at(-1) ?? entries[0] ?? null;
+
+      if(!higher) {
+
+        return null;
+      }
+
+      return entries.find((e) => (e.channel.id === higher.channel.id) && (e.resolution[0] === e.channel.width) && (e.resolution[1] === e.channel.height)) ?? higher;
     }
 
     default: {
