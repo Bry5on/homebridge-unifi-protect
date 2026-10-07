@@ -60,6 +60,12 @@ export function is4x3AspectRatio(width: number, height: number): boolean {
   return (maxDim * 3) === (minDim * 4);
 }
 
+// Determine whether a resolution is portrait-oriented (taller than it is wide), as found on doorbells such as the UniFi Protect Doorbell Lite (1504x2016).
+export function isPortraitResolution(width: number, height: number): boolean {
+
+  return width < height;
+}
+
 // Comparator that sorts RTSP entries from high to low resolution, by width then height then frame rate. Pure - no `this`, so it drops the `.bind(this)` the device
 // methods needed.
 export function sortByResolutions(a: ChannelProfile, b: ChannelProfile): number {

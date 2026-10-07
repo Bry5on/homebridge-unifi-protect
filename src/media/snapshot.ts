@@ -8,6 +8,7 @@ import type { ProtectCameraHost } from "./camera-host.ts";
 import type { SnapshotOptions } from "unifi-protect";
 import type { SnapshotRequest } from "homebridge";
 import { isPackageCameraContext } from "../types.ts";
+import { isPortraitResolution } from "./resolution.ts";
 
 // Maximum age of a snapshot in seconds.
 const PROTECT_SNAPSHOT_CACHE_MAXAGE = 90;
@@ -26,6 +27,24 @@ class SnapshotFfmpegExec extends FfmpegExec {
 
     this.log.debug("A snapshot source FFmpeg pipeline exited without producing an image; falling through to the next source.");
   }
+}
+
+// Build the scale filters for a HomeKit snapshot request. For most cameras, we fit the image within the requested dimensions and pad it to exactly those dimensions. For
+// portrait-oriented sources (e.g. a 1504x2016 doorbell) answering a landscape request (e.g. 640x360), that padding bakes thick black bars into the image, and since the
+// Home app shapes the camera tile and live view player using the snapshot's aspect ratio, those bars carry over into the live view as well. For portrait sources, we
+// preserve the native aspect ratio instead, scaling the image to cover the requested dimensions without ever upscaling beyond the source. This matches what the Protect
+// controller's own snapshots look like.
+export function snapshotScaleFilters(request: { height: number; width: number }, sourceIsPortrait: boolean): string[] {
+
+  const width = request.width.toString();
+  const height = request.height.toString();
+
+  if(sourceIsPortrait) {
+
+    return [ "scale=w=min(iw\\, max(" + width + "\\, " + height + " * iw / ih)):h=-2", "setsar=1" ];
+  }
+
+  return [ [ "scale=" + width, height, "force_original_aspect_ratio=decrease" ].join(":"), [ "pad=" + width, height, "(ow-iw)/2", "(oh-ih)/2" ].join(":") ];
 }
 
 // Camera snapshot class for Protect.
@@ -204,7 +223,9 @@ export class ProtectSnapshot {
       "-i", "pipe:0"
     ];
 
-    return this.snapFromFfmpeg(ffmpegOptions, signal, request, source.data);
+    const bufferChannel = this.protectCamera.stream.timeshift?.buffer.channelProfile?.channel;
+
+    return this.snapFromFfmpeg(ffmpegOptions, signal, request, source.data, bufferChannel ? isPortraitResolution(bufferChannel.width, bufferChannel.height) : false);
   }
 
   // Snapshots using the Protect RTSP endpoints as the source.
@@ -240,7 +261,7 @@ export class ProtectSnapshot {
       "-i", channelProfile.url
     ];
 
-    return this.snapFromFfmpeg(ffmpegOptions, signal, request);
+    return this.snapFromFfmpeg(ffmpegOptions, signal, request, undefined, isPortraitResolution(channelProfile.channel.width, channelProfile.channel.height));
   }
 
   // Snapshots using the Protect controller's snapshot command as the source. This is the unifi-protect library's camera projection snapshot, exposed through the
@@ -259,7 +280,8 @@ export class ProtectSnapshot {
   }
 
   // Generate a snapshot using FFmpeg.
-  private async snapFromFfmpeg(ffmpegInputOptions: string[], signal: AbortSignal, request?: SnapshotRequest, buffer?: Buffer): Promise<Nullable<Buffer>> {
+  private async snapFromFfmpeg(ffmpegInputOptions: string[], signal: AbortSignal, request?: SnapshotRequest, buffer?: Buffer,
+    sourceIsPortrait = false): Promise<Nullable<Buffer>> {
 
     if(!this.protectCamera.stream) {
 
@@ -309,14 +331,11 @@ export class ProtectSnapshot {
       filters.push(this.protectCamera.stream.ffmpegOptions.cropFilter);
     }
 
-    // Scale to the requested dimensions, preserving the aspect ratio and letterboxing where needed.
+    // Scale to the requested dimensions, preserving the aspect ratio. Landscape sources are letterboxed where needed, while portrait sources keep their native aspect
+    // ratio without padding. A user-configured crop changes the effective aspect ratio, so we keep the letterboxing behavior in that case.
     if(request) {
 
-      filters.push(
-
-        [ "scale=" + request.width.toString(), request.height.toString(), "force_original_aspect_ratio=decrease" ].join(":"),
-        [ "pad=" + request.width.toString(), request.height.toString(), "(ow-iw)/2", "(oh-ih)/2" ].join(":")
-      );
+      filters.push(...snapshotScaleFilters(request, sourceIsPortrait && !this.protectCamera.hints.crop));
     }
 
     // Apply the filter chain if we have any filters.

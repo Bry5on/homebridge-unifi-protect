@@ -11,7 +11,8 @@ import { AudioRecordingCodecType, AudioRecordingSamplerate, AudioStreamingCodecT
 import type { CameraController, CameraControllerOptions, CameraStreamingDelegate, HAP, PrepareStreamCallback, PrepareStreamRequest, PrepareStreamResponse, Resolution,
   Service, SnapshotRequest, SnapshotRequestCallback, StartStreamRequest, StreamRequestCallback, StreamingRequest } from "homebridge";
 import type { HomebridgePluginLogging, IpFamily, Nullable, PortReservation } from "homebridge-plugin-utils";
-import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_TIMESHIFT_BUFFER_MAXDURATION } from "../settings.ts";
+import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT, PROTECT_TIMESHIFT_BUFFER_MAXDURATION }
+  from "../settings.ts";
 import { ProtectAbortedError, livestreamAudioSampleRate } from "unifi-protect";
 import { ProtectReservedNames, isPackageCameraContext } from "../types.ts";
 import { guardedPublish, mqttTopic } from "../mqtt.ts";
@@ -25,6 +26,7 @@ import { ProtectSnapshot } from "./snapshot.ts";
 import { ProtectStreamingFfmpegProcess } from "./stream-ffmpeg-process.ts";
 import { ProtectTimeshiftSupervisor } from "./timeshift-supervisor.ts";
 import type { TalkbackSession } from "unifi-protect";
+import { isPortraitResolution } from "./resolution.ts";
 import { logLivestreamIterationError } from "./livestream.ts";
 import { resolveSessionSource } from "./stream-source-policy.ts";
 import { streamingSamplerates } from "./stream-delegate.ts";
@@ -824,6 +826,28 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
       formatBps(targetBitrate * 1000), channelProfile.name, this.protectCamera.videoCodecName,
       formatBps(channelProfile.channel.bitrate), useTsb ? "TSB/" + (this.protectCamera.hasFeature("Debug.Video.Timeshift.UseRtsp") ? "RTSP" : "API") : "RTSP");
 
+    // Portrait-oriented cameras (e.g. doorbells) need some help when we transcode them. HomeKit typically requests a landscape resolution (e.g. 640x360), and scaling a
+    // portrait source to the requested height produces a tiny frame (268x360 for a 1504x2016 source) that the Home app then upscales into a blurry live view. When
+    // we're using Apple Silicon's hardware encoder for a low-latency client, we scale portrait sources to a more useful minimum height instead. The scaler caps this
+    // at the source height, so we never upscale. Once we're sending more than was requested, we also adjust how we encode it:
+    //
+    // - We use average bitrate encoding, as we do for HKSV recordings. Quality-constrained encoding targets a fixed visual quality under a hard bitrate cap, and at the
+    //   larger frame size that demand far exceeds the cap, causing the hardware encoder to starve or drop frames, which presents as a frozen, then choppy, live view.
+    //
+    // - We send the camera's native frame rate when it's lower than what was requested (e.g. 24fps instead of 30fps), rather than duplicating frames to make up the
+    //   difference, which makes motion judder.
+    const portraitHeight = (isTranscoding && !isHighLatency && !this.protectCamera.hints.crop && (this.platform.codecSupport.hostSystem === "macOS.Apple") &&
+      this.ffmpegOptions.hardwareEncodes("stream") && isPortraitResolution(channelProfile.channel.width, channelProfile.channel.height)) ?
+      Math.max(request.video.height, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT) : request.video.height;
+    const portraitOutputHeight = Math.min(portraitHeight, channelProfile.channel.height);
+    const isPortraitUpsized = portraitOutputHeight > request.video.height;
+
+    if(isPortraitUpsized) {
+
+      this.log.info("Portrait camera: sending %sx%s.", Math.round((channelProfile.channel.width * portraitOutputHeight) / (channelProfile.channel.height * 2)) * 2,
+        portraitOutputHeight);
+    }
+
     // When on high-performance hardware like Apple Silicon, using the TSB, and we don't have low-FPS cameras like the package camera, enable the use of the
     // CPU-intensive FFmpeg minterpolate filter to enable very smooth video, especially when there's motion involved. M3+ Apple Silicon environments are able to reliably
     // use this filter in realtime and with great results. I'm hoping to be able to enable this in the future for other platforms.
@@ -837,12 +861,14 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
       ffmpegArgs.push(...this.ffmpegOptions.streamEncoder({
 
         bitrate: targetBitrate,
-        fps: useInterpolationFilter ? channelProfile.channel.fps : request.video.fps,
-        height: request.video.height,
+        fps: useInterpolationFilter ? channelProfile.channel.fps :
+          ((isPortraitUpsized && (channelProfile.channel.fps > 0)) ? Math.min(request.video.fps, channelProfile.channel.fps) : request.video.fps),
+        height: portraitHeight,
         idrInterval: HOMEKIT_IDR_INTERVAL,
         inputFps: channelProfile.channel.fps,
         level: request.video.level,
         profile: request.video.profile,
+        ...(isPortraitUpsized ? { smartQuality: false } : {}),
         // When interpolating, hand the encoder the fps and interpolation filters to smooth the presentation timestamps; it composes them into its own chain and bridges
         // any GPU-to-CPU download transfer itself.
         ...(useInterpolationFilter ? { videoFilters: [ "fps=" + request.video.fps.toString(),
