@@ -114,6 +114,9 @@ export const PROTECT_TRANSCODE_BITRATE = 2000;
 // The scaler never upscales beyond the source, so this is a quality floor, not a forced upscale.
 export const PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT = 1080;
 
+// Minimum output height, in pixels, for portrait-oriented camera livestreams sent to high-latency (e.g. cellular) clients.
+export const PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT = 720;
+
 // Default interval, in hours, for scheduled NVR reboots when enabled.
 export const PROTECT_NVR_REBOOT_INTERVAL = 6;
 
