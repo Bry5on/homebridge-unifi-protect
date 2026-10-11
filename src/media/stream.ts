@@ -11,7 +11,8 @@ import { AudioRecordingCodecType, AudioRecordingSamplerate, AudioStreamingCodecT
 import type { CameraController, CameraControllerOptions, CameraStreamingDelegate, HAP, PrepareStreamCallback, PrepareStreamRequest, PrepareStreamResponse, Resolution,
   Service, SnapshotRequest, SnapshotRequestCallback, StartStreamRequest, StreamRequestCallback, StreamingRequest } from "homebridge";
 import type { HomebridgePluginLogging, IpFamily, Nullable, PortReservation } from "homebridge-plugin-utils";
-import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT, PROTECT_TIMESHIFT_BUFFER_MAXDURATION }
+import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT,
+  PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT, PROTECT_TIMESHIFT_BUFFER_MAXDURATION }
   from "../settings.ts";
 import { ProtectAbortedError, livestreamAudioSampleRate } from "unifi-protect";
 import { ProtectReservedNames, isPackageCameraContext } from "../types.ts";
@@ -830,7 +831,8 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
     // portrait source to the requested height produces a tiny frame (268x360 for a 1504x2016 source) that the Home app then upscales into a blurry live view. When
     // we're using Apple Silicon's hardware encoder, we scale portrait sources to a more useful minimum height instead. The scaler caps this at the source height, so we
     // never upscale. We do this for high-latency clients as well, since the bitrate we've already settled on above still applies - a larger frame at the same bitrate
-    // looks far better than a tiny one the Home app upscales. Once we're sending more than was requested, we also adjust how we encode it:
+    // looks far better than a tiny one the Home app upscales. High-latency clients get a smaller (720p) floor to keep bits-per-pixel reasonable.
+    // Once we're sending more than was requested, we also adjust how we encode it:
     //
     // - We use average bitrate encoding, as we do for HKSV recordings. Quality-constrained encoding targets a fixed visual quality under a hard bitrate cap, and at the
     //   larger frame size that demand far exceeds the cap, causing the hardware encoder to starve or drop frames, which presents as a frozen, then choppy, live view.
@@ -839,7 +841,7 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
     //   difference, which makes motion judder.
     const portraitHeight = (isTranscoding && !this.protectCamera.hints.crop && (this.platform.codecSupport.hostSystem === "macOS.Apple") &&
       this.ffmpegOptions.hardwareEncodes("stream") && isPortraitResolution(channelProfile.channel.width, channelProfile.channel.height)) ?
-      Math.max(request.video.height, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT) : request.video.height;
+      Math.max(request.video.height, isHighLatency ? PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT : PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT) : request.video.height;
     const portraitOutputHeight = Math.min(portraitHeight, channelProfile.channel.height);
     const isPortraitUpsized = portraitOutputHeight > request.video.height;
 
