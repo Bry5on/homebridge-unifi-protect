@@ -828,15 +828,16 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
 
     // Portrait-oriented cameras (e.g. doorbells) need some help when we transcode them. HomeKit typically requests a landscape resolution (e.g. 640x360), and scaling a
     // portrait source to the requested height produces a tiny frame (268x360 for a 1504x2016 source) that the Home app then upscales into a blurry live view. When
-    // we're using Apple Silicon's hardware encoder for a low-latency client, we scale portrait sources to a more useful minimum height instead. The scaler caps this
-    // at the source height, so we never upscale. Once we're sending more than was requested, we also adjust how we encode it:
+    // we're using Apple Silicon's hardware encoder, we scale portrait sources to a more useful minimum height instead. The scaler caps this at the source height, so we
+    // never upscale. We do this for high-latency clients as well, since the bitrate we've already settled on above still applies - a larger frame at the same bitrate
+    // looks far better than a tiny one the Home app upscales. Once we're sending more than was requested, we also adjust how we encode it:
     //
     // - We use average bitrate encoding, as we do for HKSV recordings. Quality-constrained encoding targets a fixed visual quality under a hard bitrate cap, and at the
     //   larger frame size that demand far exceeds the cap, causing the hardware encoder to starve or drop frames, which presents as a frozen, then choppy, live view.
     //
     // - We send the camera's native frame rate when it's lower than what was requested (e.g. 24fps instead of 30fps), rather than duplicating frames to make up the
     //   difference, which makes motion judder.
-    const portraitHeight = (isTranscoding && !isHighLatency && !this.protectCamera.hints.crop && (this.platform.codecSupport.hostSystem === "macOS.Apple") &&
+    const portraitHeight = (isTranscoding && !this.protectCamera.hints.crop && (this.platform.codecSupport.hostSystem === "macOS.Apple") &&
       this.ffmpegOptions.hardwareEncodes("stream") && isPortraitResolution(channelProfile.channel.width, channelProfile.channel.height)) ?
       Math.max(request.video.height, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT) : request.video.height;
     const portraitOutputHeight = Math.min(portraitHeight, channelProfile.channel.height);
@@ -844,8 +845,8 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
 
     if(isPortraitUpsized) {
 
-      this.log.info("Portrait camera: sending %sx%s.", Math.round((channelProfile.channel.width * portraitOutputHeight) / (channelProfile.channel.height * 2)) * 2,
-        portraitOutputHeight);
+      this.log.info("Portrait camera: sending %sx%s, %s.", Math.round((channelProfile.channel.width * portraitOutputHeight) / (channelProfile.channel.height * 2)) * 2,
+        portraitOutputHeight, formatBps(targetBitrate * 1000));
     }
 
     // When on high-performance hardware like Apple Silicon, using the TSB, and we don't have low-FPS cameras like the package camera, enable the use of the
