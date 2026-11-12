@@ -14,14 +14,17 @@
  *   - ChannelRequest: the dimensions to hunt a source channel with, and whether to bias toward a richer one. The delegate makes the selection call itself, and the
  *     host's source-pixel cap it applies alongside the bias is a hardware capability rather than a decision, so that read stays there too.
  *   - VideoEncodingDecision: either a copy of the camera's own stream (carrying whether the fMP4 input needs its Annex B bitstream conversion) or a full
- *     encoder-options bag for homebridge-plugin-utils to render, plus the target bitrate the streaming-request log reports either way.
+ *     encoder-options bag for homebridge-plugin-utils to render, plus the target bitrate the streaming-request log reports either way. A portrait transcode that
+ *     sends a taller frame than HomeKit asked for also carries the realized size the delegate narrates.
  *
  * Every bitrate this module accepts and returns is in kilobits per second. The camera's channel ceiling arrives from the controller in bits per second, so the delegate
  * converts before handing it over and the module stays unit-uniform.
  */
 import type { H264Level, H264Profile, VideoEncoderOptions } from "homebridge-plugin-utils";
-import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH } from "../settings.ts";
+import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH, PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT }
+  from "../settings.ts";
 import { HOMEKIT_IDR_INTERVAL } from "homebridge-plugin-utils";
+import { isPortraitResolution } from "./resolution.ts";
 
 // Whether this live view re-encodes the camera's video, and whether HomeKit negotiated a high-latency connection. The latency reading is returned alongside because the
 // bitrate decision downstream consumes it, so it is derived once here rather than twice from the raw packet time.
@@ -47,8 +50,9 @@ export type VideoEncoding = { mode: "copy"; transmux: boolean } |
   { encoderOptions: VideoEncoderOptions; mode: "transcode" };
 
 // The resolved encoding decision: how the video is encoded, plus the target bitrate in kbps. The bitrate rides alongside rather than inside the transcode arm because
-// the streaming-request log reports it for every session, copy-mode ones included.
-export type VideoEncodingDecision = VideoEncoding & { targetBitrate: number };
+// the streaming-request log reports it for every session, copy-mode ones included. A portrait transcode that sends a taller frame than HomeKit asked for also carries
+// `portraitOutput`, the realized frame the delegate narrates; every other decision omits it.
+export type VideoEncodingDecision = VideoEncoding & { portraitOutput?: { height: number; width: number }; targetBitrate: number };
 
 /**
  * Resolve whether this live view's video is re-encoded, and read the connection's latency from the negotiated audio packet time. Pure and exhaustively testable.
@@ -129,11 +133,19 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  *      reliably use this filter in realtime and with great results; other platforms do not get this treatment yet.
  *   3. The encoding itself. A transcode composes the encoder-options bag homebridge-plugin-utils renders, taking its frame rate from the source channel while
  *      interpolating (the filters resample to the rate HomeKit asked for). A copy reports only whether the input needs transmuxing.
+ *   4. Portrait output, and only on a transcode. HomeKit typically requests a landscape frame. Scaling a portrait camera such as the Doorbell Lite (1504x2016) down
+ *      to that height produces a tiny frame the Home app then upscales. On Apple Silicon, when this host's hardware encoder is doing the transcode and the user has
+ *      not configured a crop, we aim at a minimum height instead (1080, or 720 for a high-latency client) and the scaler caps that aim at the source, so we never
+ *      upscale. When the realized frame is taller than requested we encode it the way an HKSV recording is encoded: average bitrate, and the camera's own frame rate
+ *      when that is lower than requested, so frames are not duplicated. Interpolation already chose its frame rate and filters, and keeps both.
  *
  * @param input.channelBitrate              - The selected source channel's bitrate ceiling, in kbps; the delegate converts it from the controller's bits per second.
  * @param input.channelFps                  - The selected source channel's frame rate.
+ * @param input.channelHeight               - The selected source channel's frame height, in pixels.
+ * @param input.channelWidth                - The selected source channel's frame width, in pixels.
  * @param input.cpuGeneration               - The host CPU's generation, as the platform's codec support detected it.
- * @param input.hostSystem                  - The host platform; only "macOS.Apple" admits interpolation today.
+ * @param input.crop                        - Whether the user has configured cropping for this camera's video stream.
+ * @param input.hostSystem                  - The host platform; only "macOS.Apple" admits interpolation, and the portrait height floor, today.
  * @param input.isHighLatency               - Whether HomeKit negotiated a high-latency session, from {@link resolveTranscodeDecision}.
  * @param input.isPackageCamera             - Whether this is the doorbell's package camera.
  * @param input.isTranscoding               - Whether this session re-encodes the video, from {@link resolveTranscodeDecision}.
@@ -146,14 +158,15 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  * @param input.transcodeBitrate            - The user's configured transcode bitrate, in kbps; zero leaves HomeKit's request in place.
  * @param input.transcodeHighLatencyBitrate - The user's configured high-latency transcode bitrate, in kbps; zero leaves HomeKit's request in place.
  * @param input.useTsb                      - Whether this session rides the timeshift buffer's pooled fMP4 socket rather than direct RTSP.
+ * @param input.usesHardwareEncoder         - Whether this host encodes live video on hardware.
  * @param input.videoCodec                  - The camera's source video codec, carried in the transcode bag so FFmpeg's decoder and encoder read one pipeline description.
  *
  * @returns The resolved {@link VideoEncodingDecision}.
  */
-export function resolveVideoEncoding(input: { channelBitrate: number; channelFps: number; cpuGeneration: number; hostSystem: string; isHighLatency: boolean;
-  isPackageCamera: boolean; isTranscoding: boolean; requestBitrate: number; requestFps: number; requestHeight: number; requestLevel: H264Level;
-  requestProfile: H264Profile; requestWidth: number; transcodeBitrate: number; transcodeHighLatencyBitrate: number; useTsb: boolean;
-  videoCodec: string; }): VideoEncodingDecision {
+export function resolveVideoEncoding(input: { channelBitrate: number; channelFps: number; channelHeight: number; channelWidth: number; cpuGeneration: number;
+  crop: boolean; hostSystem: string; isHighLatency: boolean; isPackageCamera: boolean; isTranscoding: boolean; requestBitrate: number; requestFps: number;
+  requestHeight: number; requestLevel: H264Level; requestProfile: H264Profile; requestWidth: number; transcodeBitrate: number; transcodeHighLatencyBitrate: number;
+  useTsb: boolean; usesHardwareEncoder: boolean; videoCodec: string; }): VideoEncodingDecision {
 
   // 1. Set the initial bitrate we should use for this request based on what HomeKit is requesting.
   let targetBitrate = input.requestBitrate;
@@ -185,18 +198,24 @@ export function resolveVideoEncoding(input: { channelBitrate: number; channelFps
     return { mode: "copy", targetBitrate, transmux: input.useTsb };
   }
 
+  // 4. Portrait output. See the ordered decision above. The height we hand the encoder is the aim; the scaler caps it at the source, and the realized frame is what
+  //    we narrate. Interpolation keeps the frame rate it already chose.
+  const portrait = portraitLivestream(input);
+
   return {
 
     encoderOptions: {
 
       bitrate: targetBitrate,
-      fps: useInterpolationFilter ? input.channelFps : input.requestFps,
-      height: input.requestHeight,
+      fps: useInterpolationFilter ? input.channelFps : portrait.fps,
+      height: portrait.height,
       idrInterval: HOMEKIT_IDR_INTERVAL,
       inputCodec: input.videoCodec,
       inputFps: input.channelFps,
       level: input.requestLevel,
       profile: input.requestProfile,
+      // Average bitrate once the realized frame is larger than HomeKit asked for. Quality-constrained encoding at that size starves the hardware encoder.
+      ...(portrait.upsized ? { smartQuality: false } : {}),
       // When interpolating, hand the encoder the fps and interpolation filters to smooth the presentation timestamps; it composes them into its own chain and bridges
       // any GPU-to-CPU download transfer itself.
       ...(useInterpolationFilter ? { videoFilters: [ "fps=" + input.requestFps.toString(),
@@ -204,6 +223,46 @@ export function resolveVideoEncoding(input: { channelBitrate: number; channelFps
       width: input.requestWidth
     },
     mode: "transcode",
+    ...(portrait.output ? { portraitOutput: portrait.output } : {}),
     targetBitrate
+  };
+}
+
+// The width of a frame `outputHeight` tall that keeps the source aspect ratio, rounded to a multiple of two the way FFmpeg's `scale=-2` does. This is the width the
+// portrait log reports; the encoder itself is told only the aim height, and the scaler derives the width.
+function evenScaledWidth(sourceWidth: number, sourceHeight: number, outputHeight: number): number {
+
+  return Math.round((sourceWidth * outputHeight) / (sourceHeight * 2)) * 2;
+}
+
+// Decide the portrait livestream's aim height, output frame rate, and, when the realized frame is taller than HomeKit asked for, the size to narrate.
+//
+// The floor applies only when we are transcoding a portrait source on Apple Silicon's hardware encoder with no crop configured. Everywhere else the request passes
+// through and nothing is narrated. The aim is the greater of the requested height and the floor; the realized height is that aim capped at the source, which is what
+// keeps a short source from being upscaled. Average-bitrate encoding and the camera's native frame rate apply only once that realized frame is actually taller than
+// the request. A zero source frame rate has nothing native to send, so the requested rate stays.
+function portraitLivestream(input: { channelFps: number; channelHeight: number; channelWidth: number; crop: boolean; hostSystem: string; isHighLatency: boolean;
+  requestFps: number; requestHeight: number; usesHardwareEncoder: boolean; }): { fps: number; height: number;
+  output?: { height: number; width: number }; upsized: boolean; } {
+
+  const qualifies = !input.crop && (input.hostSystem === "macOS.Apple") && input.usesHardwareEncoder &&
+    isPortraitResolution(input.channelWidth, input.channelHeight);
+
+  if(!qualifies) {
+
+    return { fps: input.requestFps, height: input.requestHeight, upsized: false };
+  }
+
+  const floor = input.isHighLatency ? PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT : PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT;
+  const height = Math.max(input.requestHeight, floor);
+  const realizedHeight = Math.min(height, input.channelHeight);
+  const upsized = realizedHeight > input.requestHeight;
+
+  return {
+
+    fps: (upsized && (input.channelFps > 0)) ? Math.min(input.requestFps, input.channelFps) : input.requestFps,
+    height,
+    ...(upsized ? { output: { height: realizedHeight, width: evenScaledWidth(input.channelWidth, input.channelHeight, realizedHeight) } } : {}),
+    upsized
   };
 }
