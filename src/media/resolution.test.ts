@@ -4,24 +4,25 @@
  *
  * This is the durable coverage of the resolution-selection surface, including the deep-low-resolution drift regime. The golden-master fixtures in camera.fixtures.ts
  * are the single source of expected behavior for the production buildAdvertisedProfiles / buildAdvertisedResolutions output; there is no live second implementation
- * in the tree to compare against. A checked-in selector grid separately pins the per-request mapping under both biases and the pixel-cap pre-filter.
+ * in the tree to compare against. A checked-in selector grid separately locks in the per-request mapping under both biases and the pixel-cap pre-filter.
  *
- * The harness is pure - resolution.ts is FFmpeg-free and this-free, so no HAP double, no controller, no device instance is needed. The device wrappers selectChannel /
- * selectSubstrateChannel inject this-state (rtspDefault, substrateDefault, channelProfiles, the cap) and delegate to selectChannelProfile; we reproduce the exact
- * injection here in a local closure that mirrors camera.ts line-for-line, so the selector grid proves the wrapper logic, not just the bare selector.
+ * The harness is pure - resolution.ts is FFmpeg-free and this-free, so no Homebridge runtime, no controller, no device instance is needed. The device wrappers
+ * selectChannel / selectSubstrateChannel inject this-state (rtspDefault, substrateDefault, the published list, the cap) and delegate to selectChannelProfile; we
+ * reproduce the exact injection here in a local closure that mirrors the streaming capability line-for-line, so the selector grid proves the wrapper logic, not just
+ * the bare selector.
  *
  * The golden-master fixtures are the single source of expected behavior: when a later change intentionally alters behavior, the diff lands as a reviewed change to a
  * checked-in fixture value and these tests flag exactly the rows that moved.
  */
-import { AI_PRO_CHANNELS, C5_WITNESS_CHANNELS, CAMERA_FIXTURES, FIXTURE_HOST, FIXTURE_RTSPS_PORT, MIXED_RTSP_DISABLED_CHANNELS, PACKAGE_FIXTURES, SANITY_FAIL_CHANNELS,
-  makeChannel } from "../camera.fixtures.ts";
-import { buildAdvertisedProfiles, buildAdvertisedResolutions, buildChannelProfile, capByPixels, isPrimaryChannel, rtspUrl, selectChannelProfile } from "./resolution.ts";
+import { AI_PRO_CHANNELS, C5_WITNESS_CHANNELS, CAMERA_FIXTURES, FIXTURE_HOST, FIXTURE_RTSPS_PORT, G6_PRO_ENTRY_CHANNELS, MIXED_RTSP_DISABLED_CHANNELS, PACKAGE_FIXTURES,
+  SANITY_FAIL_CHANNELS, makeChannel } from "../camera.fixtures.ts";
+import type { ChannelProfile, SelectRequest } from "./resolution.ts";
+import { buildAdvertisedProfiles, buildAdvertisedResolutions, buildChannelProfile, capByPixels, isPortraitResolution, isPrimaryChannel, rtspUrl,
+  selectChannelProfile } from "./resolution.ts";
 import { describe, test } from "node:test";
-import type { ChannelProfile } from "./resolution.ts";
 import type { Nullable } from "homebridge-plugin-utils";
 import type { ProtectCameraChannelConfig } from "unifi-protect";
 import type { Resolution } from "homebridge";
-import type { SelectRequest } from "./resolution.ts";
 import assert from "node:assert/strict";
 
 // A selector outcome projected to the comparison shape: the matched channel id and the matched entry resolution (or null when no entry matches).
@@ -44,8 +45,9 @@ function outcome(entry: Nullable<ChannelProfile>): SelectOutcome | null {
   return entry ? { id: entry.channel.id, resolution: entry.resolution } : null;
 }
 
-// Build the native RTSP entries the parent build consumes from a channel set, mirroring camera.ts refreshChannelProfiles: filter to RTSP-enabled primary channels, skip
-// the sanity-fail channels, and construct an entry per channel against the fixture host.
+// Build the native RTSP entries the parent build consumes from a channel set, mirroring the camera's derivation behind deriveAdvertisedStreams: filter to primary
+// channels, skip the sanity-fail channels, and construct an entry per channel against the fixture host. RTSP enablement is deliberately not a filter term here, which
+// is what keeps this mirroring the production derivation: it filters on the package complement alone.
 function nativeEntries(channels: ProtectCameraChannelConfig[]): ChannelProfile[] {
 
   const entries: ChannelProfile[] = [];
@@ -104,22 +106,30 @@ describe("resolution golden-master: package list (production == checked-in fixtu
   }
 });
 
-describe("resolution: the RTSP-enabled / sanity-fail channel filtering", () => {
+describe("resolution: the primary-channel / sanity-fail channel filtering", () => {
 
-  // A disabled channel is dropped from the native list before the build runs (isPrimaryChannel gates on isRtspEnabled). The Mixed-RTSP-disabled corpus has its Medium
-  // channel disabled, so no entry ever references channel 1.
-  test("a disabled channel never appears in the advertised list", () => {
+  // An RTSP-disabled channel IS advertised: isPrimaryChannel is the package-complement test alone, because the livestream API serves any channel. The Mixed-RTSP-disabled
+  // corpus has its Medium channel disabled, so channel 1 appears in the advertised list; the RTSP-enabled subset is a per-consumer view the selectors apply instead.
+  test("a disabled channel still appears in the advertised list", () => {
 
     const produced = buildAdvertisedProfiles(nativeEntries(MIXED_RTSP_DISABLED_CHANNELS));
 
-    assert.equal(produced.some((e) => (e.channel.id === 1)), false);
+    assert.equal(produced.some((e) => (e.channel.id === 1)), true);
+    assert.equal(produced.length > 0, true);
+  });
+
+  // The package channel is the one channel the primary build excludes, whatever its RTSP state - it belongs to the package class. The G6 Pro Entry corpus carries one.
+  test("the package channel never appears in the primary advertised list", () => {
+
+    const produced = buildAdvertisedProfiles(nativeEntries(G6_PRO_ENTRY_CHANNELS));
+
+    assert.equal(produced.some((e) => (e.channel.name === "Package Camera")), false);
     assert.equal(produced.length > 0, true);
   });
 
   // The all-sanity-fail case (a 0-width channel and an empty-name channel): the native list is empty, so buildAdvertisedProfiles([]) returns [] without throwing, and
-  // this case is asserted directly since there is no second implementation in the tree to compare against. The device level re-asserts this: camera.ts
-  // refreshChannelProfiles guards `if(!advertised.length) { return false; }` BEFORE constructing the streaming delegate or calling configureController, so an all-fail
-  // camera builds no controller.
+  // this case is asserted directly since there is no second implementation in the tree to compare against. The device level re-asserts this: the camera's derivation
+  // returns null BEFORE constructing the streaming delegate or calling configureController, so an all-fail camera builds no controller.
   test("buildAdvertisedProfiles([]) returns [] (no throw) - the device short-circuit signal", () => {
 
     const empty = nativeEntries(SANITY_FAIL_CHANNELS);
@@ -131,8 +141,8 @@ describe("resolution: the RTSP-enabled / sanity-fail channel filtering", () => {
 
 describe("resolution: selector per-request mapping through the selectChannel wrapper (checked-in grid)", () => {
 
-  // The published list the wrapper reads: the AI Pro's own advertised list, built uncapped and preference-free, as the device publishes it before selectChannel reads
-  // this.channelProfiles. AI Pro is a clean 16:9 4K camera (High 3840x2160 / Medium 1280x720 / Low 640x360), so the per-request mapping is legible.
+  // The published list the wrapper reads: the AI Pro's own advertised list, built uncapped and preference-free, as the streaming capability publishes it before
+  // selectChannel selects over it. AI Pro is a clean 16:9 4K camera (High 3840x2160 / Medium 1280x720 / Low 640x360), so the per-request mapping is legible.
   const published = buildAdvertisedProfiles(nativeEntries(AI_PRO_CHANNELS));
 
   // The 1080p pixel cap. Note capByPixels filters on the CHANNEL's native pixels, not the entry's advertised resolution, so a 2560x1440-labeled entry backed by the
@@ -141,8 +151,8 @@ describe("resolution: selector per-request mapping through the selectChannel wra
 
   // The checked-in selector grid: { bias } x { uncapped, 1080p cap } x { target } => the expected (id, resolution) outcome, derived from the reference implementation and
   // confirmed by the independent production-vs-reference sweep. Bias-lower picks the next-narrower (or lowest) channel; bias-higher picks the next-wider (or highest).
-  // Under the 1080p cap the High channel is filtered out, so every selection lands on Medium or Low. The two 1280x720 rows reflect the exact channel-dimension-match fix:
-  // an exact channel-dimension match now returns the native-dimensioned [1280,720,30] entry rather than the higher [2560,1440,30] synthetic that shares the Medium
+  // Under the 1080p cap the High channel is filtered out, so every selection lands on Medium or Low. The two 1280x720 rows reflect the exact channel-dimension-match
+  // behavior: an exact channel-dimension match returns the native-dimensioned [1280,720,30] entry rather than the higher [2560,1440,30] synthetic that shares the Medium
   // channel - same channel/id, honest label.
   const GRID: { bias: "higher" | "lower"; expected: SelectOutcome; height: number; maxPixels: number; width: number }[] = [
 
@@ -174,7 +184,7 @@ describe("resolution: selector per-request mapping through the selectChannel wra
     });
   }
 
-  // The explicit Pi+hwtranscode+Rtsp.Only.HIGH-above-cap witness: a constrained-hardware transcode request that pins rtspDefault to
+  // The explicit Pi+hwtranscode+Rtsp.Only.HIGH-above-cap witness: a constrained-hardware transcode request that sets rtspDefault to
   // "HIGH" AND caps at 1080p simultaneously. The HIGH channel (3840x2160, 8.3M px) exceeds the cap, so the pre-filter drops it BEFORE the name match runs - the name
   // branch finds no HIGH entry under the cap and returns null. This proves maxPixels filters the name branch too (it is a pre-filter, not a nearest-only request field).
   test("Pi witness: rtspDefault=HIGH + maxPixels=1080p + bias higher => null (HIGH exceeds the cap)", () => {
@@ -184,8 +194,8 @@ describe("resolution: selector per-request mapping through the selectChannel wra
     assert.equal(result, null);
   });
 
-  // A name-pin under no cap resolves to the named channel regardless of the target dimensions (the name branch ignores width/height).
-  test("name-pin HIGH (uncapped) resolves to the High channel", () => {
+  // A name request under no cap resolves to the named channel regardless of the target dimensions (the name branch ignores width/height).
+  test("a name request for HIGH (uncapped) resolves to the High channel", () => {
 
     const result = outcome(selectChannelViaWrapper(published, "HIGH", 640, 360));
 
@@ -204,7 +214,7 @@ describe("resolution: the deep-low-resolution drift (the regression locus, exerc
 
   // The 640x480 4:3 deep-low-resolution witness is the regression locus: the 1920 mandate inserts a 1920x1440 entry ABOVE the 640x480 native top, which re-sorts to the
   // front, so the per-candidate gate's drifting current-top becomes 1920 - which is precisely what then admits the 1280x960 and 1024x768 entries (all < 1920). A frozen
-  // native-top would have dropped them. The golden-master fixture above already pins the exact list; here we additionally assert the structural invariants the regression
+  // native-top would have dropped them. The golden-master fixture above already locks in the exact list; here we additionally assert the structural rules the regression
   // violated, so the regression's signature is named explicitly in a test.
   test("the deep-low-resolution 4:3 camera admits the under-mandate resolutions (no under-mandate drop)", () => {
 
@@ -237,16 +247,16 @@ describe("resolution: the deep-low-resolution drift (the regression locus, exerc
 
 describe("resolution: the advertised list is streaming-preference-free", () => {
 
-  // The list build takes no streaming preference: every synthetic maps to its NEAREST channel (the AI Pro id sequence 0,1,1,1,2,2,2), not a name-pinned one.
-  // buildAdvertisedProfiles is preference-free by construction: the streaming preference (Video.Rtsp.Only.X) is applied only at request time, in the selectChannel
-  // wrapper, never during list construction.
+  // The list build takes no streaming preference: every synthetic maps to its NEAREST channel (the AI Pro id sequence 0,1,1,1,2,2,2), not one a name request picks.
+  // buildAdvertisedProfiles is preference-free by construction: the streaming preference (the Video.Rtsp.Only setting) is applied only at request time, in the
+  // selectChannel wrapper, never during list construction.
   test("buildAdvertisedProfiles maps to nearest channels; the streaming preference applies only at request time", () => {
 
     const list = buildAdvertisedProfiles(nativeEntries(AI_PRO_CHANNELS));
 
     assert.deepEqual(list.map((e) => e.channel.id), [ 0, 1, 1, 1, 2, 2, 2 ]);
 
-    // The same published list, queried at request time with a HIGH preference, name-pins to the High channel (id 0) - the preference's only remaining home.
+    // The same published list, queried at request time with a HIGH preference, resolves by name to the High channel (id 0) - the preference's only remaining home.
     assert.equal(outcome(selectChannelViaWrapper(list, "HIGH", 640, 360))?.id, 0);
   });
 });
@@ -268,5 +278,48 @@ describe("resolution: rtspUrl - the two scheme branches", () => {
     const channel = makeChannel({ fps: 30, height: 1080, id: 0, name: "High", width: 1920 });
 
     assert.equal(rtspUrl(channel, "h", 7447, false), "rtsp://h:7447/" + channel.rtspAlias);
+  });
+});
+
+/* The host a URL is composed against, in each form it can arrive in. An IPv6 address has to be bracketed or an RTSP client cannot tell its colons from the port
+ * separator, an IPv4 address reaches the URL unchanged, an address already bracketed is not bracketed again, and an IPv6 address carrying a zone is refused, because
+ * no URL can carry one. Each scheme branch composes the host the same way, so the rows alternate between them.
+ */
+describe("resolution: rtspUrl - the host forms", () => {
+
+  const channel = makeChannel({ fps: 30, height: 1080, id: 0, name: "High", width: 1920 });
+
+  test("an IPv4 address passes through unchanged", () => {
+
+    assert.equal(rtspUrl(channel, "192.168.1.10", 7441), "rtsps://192.168.1.10:7441/" + channel.rtspAlias + "?enableSrtp");
+  });
+
+  test("a bare IPv6 address is bracketed so its colons are not read as the port separator", () => {
+
+    assert.equal(rtspUrl(channel, "fd00::1:2", 7447, false), "rtsp://[fd00::1:2]:7447/" + channel.rtspAlias);
+  });
+
+  test("an IPv6 address the caller already bracketed is not bracketed twice", () => {
+
+    assert.equal(rtspUrl(channel, "[fd00::1:2]", 7441), "rtsps://[fd00::1:2]:7441/" + channel.rtspAlias + "?enableSrtp");
+  });
+
+  test("an IPv6 address carrying a zone is refused", () => {
+
+    assert.throws(() => rtspUrl(channel, "fe80::1%en0", 7441), TypeError, "a zone has no place in a URL");
+  });
+});
+
+describe("resolution: isPortraitResolution", () => {
+
+  test("a doorbell frame taller than it is wide is portrait", () => {
+
+    assert.equal(isPortraitResolution(1504, 2016), true);
+  });
+
+  test("a landscape frame and a square frame are not portrait", () => {
+
+    assert.equal(isPortraitResolution(1920, 1080), false);
+    assert.equal(isPortraitResolution(1080, 1080), false);
   });
 });

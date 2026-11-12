@@ -60,7 +60,7 @@ Getting `homebridge-unifi-protect` connected to UniFi Protect is the foundationa
 ### <A NAME="network"></A>Network Issues
 If you run homebridge in Docker, or a VM or VM-like environment, you might run into a network issue without realizing it due to situations with multiple network interface cards (NICs). By default, Homebridge listens for HomeKit requests on all the network interfaces it finds when it starts up. Homebridge, not `homebridge-unifi-protect`, decides which interface to use when streaming video.
 
-**If your symptoms are something along the lines of "snapshots work, but video streaming doesn't", it's almost certainly a network interface issue.** (There's one other cause of that exact symptom - an AV1 camera on the direct-RTSP path - covered in the video streaming section below.)
+**If your symptoms are something along the lines of "snapshots work, but video streaming doesn't", it's almost certainly a network interface issue.**
 
 [You will need to select the correct advertised network interface in Homebridge](https://github.com/homebridge/homebridge/wiki/mDNS-Options#how-to-select-advertised-network-interfaces).
 
@@ -99,12 +99,12 @@ Almost all of the streaming issues that aren't one of the simpler ones described
  * The quality of the stream is pushing more data at a faster rate than either FFmpeg can consume or the HomeKit device can consume (or both!).
  * When transcoding, the hardware that HBUP is running on is unable to keep up with the requirements of the stream that's being pushed through it.
 
-There's also one specific gotcha worth calling out: **an AV1-encoded camera can't stream over direct RTSP**...the bundled version of FFmpeg can't carry AV1 that way. If you've disabled `Video.Timeshift.Livestream` on an AV1 camera, live views will fail (the log will say so in plain language) while snapshots keep working - the same symptom as a network-interface issue, but a completely different cause. The fix is simple: re-enable `Video.Timeshift.Livestream` (it's on by default), and the camera streams from the buffer as intended.
+There's also one specific behavior worth knowing about: **an AV1-encoded camera can't stream over direct RTSP**...the bundled version of FFmpeg can't carry AV1 that way. There's nothing to fix here. An AV1 camera's live views are served from the timeshift buffer regardless of how you've set `Video.Timeshift.Livestream`, so the setting simply doesn't apply to that camera. The streaming request line in the log names the transport each view used, so `TSB/API` there is HBUP telling you it took the buffer path.
 
 ##### Use A Lower Stream Quality
 While the defaults work for most users, most of the time, sometimes the specifics of your own environment will make things off *just enough* that streaming doesn't work. The first, and easiest, step in addressing it is simple: **have HBUP feed from a lower stream quality**.
 
-On a default setup, your live views come from the timeshift buffer, so the option you want is `Video.Timeshift.Only.Low`, under the *Timeshift Buffer* section of the HBUP feature options webUI - that forces the buffer (which also feeds HKSV and snapshots) to draw from the Low stream. If instead you've switched a camera's live views to direct RTSP, the equivalent knob is `Video.Rtsp.Only.Low` under the *Video* section. If lowering the quality works, then you're done and your HomeKit life is once more complete and all is right with the world. You can experiment and see if the *Medium* stream works after you're up and running.
+On a default setup, your live views come from the timeshift buffer, so the option you want is `Video.Timeshift.Only.Low`, under the *Timeshift Buffer* section of the HBUP webUI's Settings tab - that forces the buffer (which also feeds HKSV and snapshots) to draw from the Low stream. If instead you've switched a camera's live views to direct RTSP, the equivalent knob is `Video.Rtsp.Only.Low` under the *Video* section. If lowering the quality works, then you're done and your HomeKit life is once more complete and all is right with the world. You can experiment and see if the *Medium* stream works after you're up and running.
 
 I know that instinctively people may not like the idea of having higher-end Protect cameras and using what they perceive to be a low-quality stream. To that, I'd say a couple of things...the quality of the stream is actually *very* good relative to the very conservative bitrates HomeKit tends to request. Those bitrates can be overridden by tweaking your feature options, but in general, lower quality video streaming is just the nature of the HomeKit beast, I'm afraid. For the purposes of glancing at video on occasion, it's more than sufficient.
 
@@ -120,7 +120,7 @@ Transcoding has two significant implications:
   * It will consume more CPU on the device where you run Homebridge. If your device is underpowered, it may struggle to use higher quality streams.
   * The quality of the final stream will be reduced to comply with HomeKit's requested parameters. This is because HomeKit defaults to a very modest bitrate - 299kbps in the above example versus the 2,000kbps being provided by Protect - which represents a 6.5x reduction in quality!
 
-You can tune when HBUP chooses to transcode by adjusting the options under the video section of the HBUP feature options webUI. If you're struggling with potential CPU constraints in your environment, feeding from a lower stream quality should reduce the CPU load on your hardware. I'd recommend starting with the *Low* quality stream and working your way up to see what works best in your environment.
+You can tune when HBUP chooses to transcode by adjusting the options under the video section of the HBUP webUI's Settings tab. If you're struggling with potential CPU constraints in your environment, feeding from a lower stream quality should reduce the CPU load on your hardware. I'd recommend starting with the *Low* quality stream and working your way up to see what works best in your environment.
 
 ##### Final Thoughts
 For quickly trying to get things up and running when you're struggling, always start by feeding from the *Low* stream quality (`Video.Timeshift.Only.Low` on a default setup). From there, experiment with the options to tune it to your environment.

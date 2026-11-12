@@ -17,12 +17,14 @@
  * Matches the pure-module voice of livestream-recovery-policy.ts and nvr-policy.ts: a small, exported, side-effect-free surface paired with a thin live-read wrapper.
  */
 import type { Nullable } from "homebridge-plugin-utils";
+import { PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET } from "../settings.ts";
 import type { ProtectCameraChannelConfig } from "unifi-protect";
 import type { Resolution } from "homebridge";
+import { formatUrlHost } from "homebridge-plugin-utils";
 
 // One RTSP entry: a camera channel mapped to a HomeKit resolution, with the friendly display name and the FFmpeg `-i` input URL the media path consumes. The full
-// shape is load-bearing - the URL flows to live streaming, RTSP snapshots, and the livestream RTSP fallback - so the entry stays whole rather than split into a
-// transport-free profile.
+// shape carries the whole transport contract - the URL flows to live streaming, RTSP snapshots, and the livestream RTSP fallback, and splitting it would break each
+// of those consumers - so the entry stays whole rather than split into a transport-free profile.
 export interface ChannelProfile {
 
   channel: ProtectCameraChannelConfig;
@@ -112,9 +114,13 @@ export function formatResolution(resolution: Resolution): string {
 // Compose a channel's RTSP URL from host, port, and alias. Pure string composition - the host and port are supplied by the caller (the device owns the host chain), and
 // the alias is the channel's own. No I/O. By default we emit the secure SRTP-enabled stream URL (rtsps://...?enableSrtp) the plugin connects to; pass secure: false for
 // the plain RTSP catalog URL (rtsp://...) the M3U playlist publishes for external app consumers.
+//
+// The host goes through formatUrlHost, so an IPv6 address is bracketed and its colons are never read as the port separator, while an IPv4 address, a hostname, and an
+// address the caller already bracketed pass through unchanged. An IPv6 address carrying a zone is refused, because no URL can carry one...the controller root sets
+// such an override address aside before it reaches a camera's host chain, and the hosts the controller reports never carry a zone.
 export function rtspUrl(channel: ProtectCameraChannelConfig, urlHost: string, rtspPort: number, secure = true): string {
 
-  return (secure ? "rtsps://" : "rtsp://") + urlHost + ":" + rtspPort.toString() + "/" + channel.rtspAlias + (secure ? "?enableSrtp" : "");
+  return (secure ? "rtsps://" : "rtsp://") + formatUrlHost(urlHost) + ":" + rtspPort.toString() + "/" + channel.rtspAlias + (secure ? "?enableSrtp" : "");
 }
 
 // Whether a channel is the doorbell's secondary package-camera channel.
@@ -123,11 +129,12 @@ export function isPackageChannel(channel: ProtectCameraChannelConfig): boolean {
   return channel.name === PACKAGE_CHANNEL_NAME;
 }
 
-// Whether a channel is an RTSP-enabled primary camera channel (the complement of the package channel within the RTSP-enabled set). The camera class filters its
-// channel list with this to build the primary advertised list, leaving the package channel to the package class.
+// Whether a channel is a primary camera channel - the complement of the package channel. The camera class filters its channel list with this to build the primary
+// advertised list, leaving the package channel to the package class. RTSP enablement is deliberately not part of this test: the livestream API serves any channel, so
+// the flag is a per-consumer concern the selectors and the RTSP-consuming paths apply to their own view of the published list.
 export function isPrimaryChannel(channel: ProtectCameraChannelConfig): boolean {
 
-  return channel.isRtspEnabled && !isPackageChannel(channel);
+  return !isPackageChannel(channel);
 }
 
 // Construct one ChannelProfile from a channel. This is the single entry constructor every ChannelProfile across the camera and package classes is built through: the
@@ -223,22 +230,54 @@ export function selectChannelProfile(entries: readonly ChannelProfile[], request
 
     default: {
 
-      // SelectRequest is a closed discriminated union under today's two variants, so this branch is unreachable; the fallback returns null as a safe default
-      // rather than a compile-time exhaustiveness guarantee.
+      // SelectRequest is a closed discriminated union, so this branch is unreachable; the fallback returns null as a safe default rather than a compile-time
+      // exhaustiveness guarantee.
       return null;
     }
   }
 }
 
-// Build the per-camera advertised resolution list HomeKit consumes, from the camera's native RTSP entries. This is the entangled crux of the resolution surface, lifted
-// verbatim from the device's channel-profile derivation (refreshChannelProfiles): sort high to low; capture the native top (the empty list returns []); pick the
+/**
+ * Select the channel that populates the standing timeshift buffer from an already pixel-capped entry list. The policy is source-independent,
+ * HomeKit-Secure-Video-state-independent, and RTSP-independent by construction, in order: (1) a user pin wins outright - an exact name match, null on a miss, the loud
+ * user-pin failure; (2) a pixel-constrained encoder host (a Raspberry Pi) takes the highest-quality channel at or below its constrained target, biased downward,
+ * preference-free so the buffer does not inherit the direct-RTSP quality preference; (3) otherwise the highest-quality channel, taken structurally as the first entry
+ * with no name lookup. Pure, so the camera's derivation can select the buffer's channel over a list it has not published yet, exactly as the buffer later will.
+ *
+ * @param entries          - The candidate channel profiles, sorted high to low and already filtered by the host encoder's pixel cap.
+ * @param input.hostSystem - The host system the codec support reports, which marks a pixel-constrained encoder host.
+ * @param input.pin        - The user's pinned channel name, or null when no channel is pinned.
+ *
+ * @returns The channel profile that populates the buffer, or null when the pin names no available channel or there is nothing to choose from.
+ */
+export function selectSubstrateChannelFrom(entries: readonly ChannelProfile[], input: { hostSystem: string; pin: Nullable<string> }): Nullable<ChannelProfile> {
+
+  // (1) A user pin wins outright: exact name match, null on a miss.
+  if(input.pin) {
+
+    return selectChannelProfile(entries, { mode: "name", name: input.pin });
+  }
+
+  // (2) A pixel-constrained encoder host: the highest-quality channel at or below the constrained target, biased downward and preference-free.
+  if(input.hostSystem === "raspbian") {
+
+    return selectChannelProfile(entries, { bias: "lower", height: PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET.height, mode: "nearest",
+      width: PROTECT_TIMESHIFT_CONSTRAINED_HOST_TARGET.width });
+  }
+
+  // (3) Otherwise, the highest-quality channel - the first surviving entry, taken structurally with no name lookup.
+  return entries[0] ?? null;
+}
+
+// Build the per-camera advertised resolution list HomeKit consumes, from the camera's native RTSP entries. This is the entangled crux of the resolution surface, and it
+// is the exact sequence the camera's deriveAdvertisedStreams delegates to: sort high to low; capture the native top (the empty list returns []); pick the
 // aspect-appropriate base table; expand each row to 30 and 15 fps; then, for each candidate that belongs (under the drifting current top), find the closest RTSP match
 // and append it with the matched channel's native frame rate, re-sorting after each insert. Finally, normalize non-conforming frame rates to {15,24,30} so HomeKit will
 // attempt the camera.
 //
 // The list build is preference-free: each candidate's closest-match uses the bias-lower nearest selection, mapping every HomeKit resolution to the highest channel at or
-// below it. The direct-RTSP quality preference (Video.Rtsp.Only.X) is a request-time concern the selectChannel wrapper applies when a stream starts; it must not bias
-// which resolutions we advertise: doing so would also pin the substrate default to the direct-RTSP channel on constrained hosts.
+// below it. The direct-RTSP quality preference (the Video.Rtsp.Only pin) is a request-time concern the selectChannel wrapper applies when a stream starts; it must not
+// bias which resolutions we advertise: doing so would also pin the substrate default to the direct-RTSP channel on constrained hosts.
 export function buildAdvertisedProfiles(nativeEntries: readonly ChannelProfile[]): ChannelProfile[] {
 
   // Copy the native entries into a mutable working list and sort it high to low. We never mutate the caller's array.

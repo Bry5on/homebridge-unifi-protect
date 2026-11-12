@@ -5,14 +5,16 @@
 import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS, PROTECT_LIVESTREAM_API_IDR_INTERVAL, PROTECT_LIVESTREAM_IDLE_TOLERANCE_MS, PROTECT_SEGMENT_RESOLUTION }
   from "../settings.ts";
+import { formatErrorMessage, isKeyframe } from "homebridge-plugin-utils";
 import type { ChannelProfile } from "./resolution.ts";
 import { EventEmitter } from "node:events";
 import { LIVE_SELF_HEAL_THRESHOLD } from "./livestream-recovery-policy.ts";
+import type { LivestreamAudioFormat } from "./stream-delegate.ts";
 import type { LivestreamSubscription } from "./livestream.ts";
 import type { ProtectCameraHost } from "./camera-host.ts";
 import { ProtectLivestreamUnavailableError } from "unifi-protect";
 import type { Segment } from "unifi-protect";
-import { isKeyframe } from "homebridge-plugin-utils";
+import { livestreamAudioFormat } from "./stream-delegate.ts";
 import { logLivestreamIterationError } from "./livestream.ts";
 
 // Why the standing buffer stopped, carried by the `stopped` event. "ended" is a recoverable end - a deliberate stop, a codec-change restart, or an unexpected iterator
@@ -54,8 +56,8 @@ interface KeyframeAlignedStart {
 }
 
 // A single buffered timeshift entry. The fMP4 fragment and its keyframe classification are bound together in one struct so the segment and its keyframe flag are
-// stored, trimmed, and cleared as an indivisible unit. This makes a desync between a fragment and its keyframe flag structurally unrepresentable rather than an
-// invariant a caller must uphold by convention.
+// stored, trimmed, and cleared as an indivisible unit. This makes a desync between a fragment and its keyframe flag structurally unrepresentable rather than a
+// rule a caller must uphold by convention.
 interface TimeshiftSegment {
 
   data: Buffer;
@@ -86,18 +88,23 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
   // Segment resolution for the timeshift buffer. Fixed at PROTECT_SEGMENT_RESOLUTION (100ms) because a small value gives HKSV a better event recording experience
   // at a trivial CPU cost on modern systems.
   private readonly _segmentLength: number = PROTECT_SEGMENT_RESOLUTION;
-  // The injected wall-clock seam (production systemClock, a controllable TestClock under test). The timeshift reads it for keyframe-staleness timing - the
+  // The injected wall-clock interface (production systemClock, a controllable TestClock under test). The timeshift reads it for keyframe-staleness timing - the
   // _lastKeyframeTime write on each keyframe and the now-versus-then staleness compare in snapshotSource - so that path is test-deterministic without a real-time
   // wait. This mirrors the recording delegate's clock field-copy exactly (record.ts), reaching the clock through the platform handle the camera already carries.
   private readonly clock: Clock;
   private readonly log: HomebridgePluginLogging;
   private readonly protectCamera: ProtectCameraHost;
   private segmentCount: number;
+  // The owner's lifetime signal, or undefined for a buffer with no owner. Every livestream call carries it, so the owner's abort ends the subscription, and start()
+  // reads it once more at its commit point, the one window the owner's own stop() cannot reach.
+  private readonly signal?: AbortSignal;
   // The active livestream subscription. Its presence is the single source of truth for whether the timeshift buffer is running; the public `isStarted` getter
   // derives from `subscription !== undefined`.
   private subscription?: LivestreamSubscription;
 
-  constructor(protectCamera: ProtectCameraHost) {
+  // Create a timeshift buffer for a camera. The optional signal is the owner's lifetime: start() hands it to each livestream call and reads it at its commit point. A
+  // buffer constructed without an owner holds none and behaves exactly as one whose owner's lifetime never ends.
+  constructor(protectCamera: ProtectCameraHost, options: { signal?: AbortSignal } = {}) {
 
     // Initialize the event emitter.
     super();
@@ -112,10 +119,16 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
     this.log = protectCamera.log;
     this.protectCamera = protectCamera;
     this.segmentCount = 1;
+    this.signal = options.signal;
   }
 
-  // Start the livestream and begin maintaining our timeshift buffer.
-  public async start(channelProfile: ChannelProfile): Promise<boolean> {
+  /* Start the livestream and begin maintaining our timeshift buffer. An adopted subscription - the one the camera's derivation opened to read its recording audio
+   * format - takes the place of a fresh one. Adoption rather than releasing it and subscribing again is the form, because the pool tears a session down when its last
+   * subscriber leaves, so a release-and-rejoin would close the stream and open it again. The adopted subscription runs the same establishment, init and signal checks
+   * a fresh one does: an established subscription passes at once, and one whose init is null declines exactly as a fresh one does. Its signal is the camera's rather
+   * than our owner's, which is benign, because stop() disposes a committed subscription directly and the commit-point check below reads our owner's own signal.
+   */
+  public async start(channelProfile: ChannelProfile, adopted?: LivestreamSubscription): Promise<boolean> {
 
     // Reset the pending stop cause at the head of every start. An establishment-phase give-up (whenEstablished false) disposes a local subscription that was never
     // committed, so it never reaches finalizeSubscription to emit and clear the cause; without this reset a latched "giveUp" would mislabel the next out-of-band death
@@ -131,7 +144,7 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
     // Clear out the timeshift buffer, if it's been previously filled, and then fire up the timeshift buffer.
     this.clearBuffer();
 
-    // Create the pooled livestream subscription via the camera seam. This call is synchronous: it returns the subscription handle immediately and begins
+    // Create the pooled livestream subscription via the camera interface. This call is synchronous: it returns the subscription handle immediately and begins
     // establishing the underlying connection in the background. We start consuming segments below within the same synchronous frame, which guarantees the consumer
     // is in place before any asynchronous segment can be delivered on the subscription.
     //
@@ -140,12 +153,13 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
     // (latency-tolerant, so an idle prebuffer eases off a stressed-but-reachable controller). The closure moves only the recovery tolerance; the library's media-stall
     // detection floors at max(urgency, 2000ms) regardless, so the prebuffer stays watched at the 2-second floor either way. A genuine reconnect surfaces inline as a
     // discontinuity-marked segment (handled in processSegment), so there is no separate disconnect handler to attach.
-    const subscription = this.protectCamera.livestream(channelProfile, { discardOnDispose: true, segmentLength: this._segmentLength,
+    const subscription = adopted ?? this.protectCamera.livestream(channelProfile, { discardOnDispose: true, segmentLength: this._segmentLength, signal: this.signal,
       urgency: () => this._isTransmitting ? PROTECT_LIVESTREAM_ACTIVE_TOLERANCE_MS : PROTECT_LIVESTREAM_IDLE_TOLERANCE_MS });
 
     // Drive the segment iterator in the background. The for-await loop runs until the subscription is disposed (graceful return), terminated with a typed error
     // (ProtectLivestreamUnavailableError if the recovery policy gave up, ProtectCodecChangeError if the stream format changed, or another unexpected failure), or
-    // otherwise rejects. Errors are classified and logged and the loop exits cleanly...stop() is the single release point that disposes the subscription.
+    // otherwise rejects. Errors are classified and logged and the loop exits cleanly. The subscription is released by stop(), or by the owner's signal, whose abort
+    // ends the subscription and with it this loop.
     void this.consumeSegments(subscription);
 
     // Wait for the session to establish. The unifi-protect library's whenEstablished is MEDIA-keyed: it resolves true once the first media segment has been delivered
@@ -167,6 +181,20 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
       return false;
     }
 
+    // The owner's lifetime can end while this start's establishment is in flight, and the owner's own stop() acts only on a committed subscription - so this is the
+    // one window stop() cannot cover. The owner's signal already ends the subscription, but the establishment wait can still answer true for a subscription that
+    // signal has ended, and committing it would hand a torn-down owner a started buffer, while the disconnect path expects every pool subscription's release to be
+    // under way before the unifi-protect client is disposed. We read the owner's signal rather than the subscription's own state because the owner's end is the one
+    // case this check exists for: a session the pool ends in this window is committed and left to the consume loop, which finalizes it so the owner can re-establish,
+    // as it does for any other end. A start whose owner's lifetime has ended disposes its local subscription and declines, exactly like the establishment-failure
+    // paths above.
+    if(this.signal?.aborted) {
+
+      void subscription[Symbol.asyncDispose]();
+
+      return false;
+    }
+
     // Every check has passed. Commit the subscription as the backing state; isStarted flips from false to true atomically with this assignment, and the channel
     // profile commits in the same synchronous frame, so the (isStarted, channelProfile) pair is never observable out of sync. The failed-start paths above never
     // assign the profile, so external readers never see an entry whose start did not succeed.
@@ -182,12 +210,15 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
   // rules.
   //
   // The finally block is the self-cleaning anchor for out-of-band iterator termination (the recovery give-up, a codec change, unexpected errors). The id-based
-  // identity guard discriminates the teardown paths with a single compare, and is resilient to future indirection (proxies, wrappers) because subscription ids
+  // identity guard tells the teardown paths apart with a single compare, and is resilient to future indirection (proxies, wrappers) because subscription ids
   // are stable strings rather than object references:
   //
   //   - stop() called externally: stop() cleared `this.subscription` before the iterator observed the queue close, so the id compare against undefined fails
   //     and we no-op (stop() already fired the terminated emit if applicable).
-  //   - start() validation failed: the local subscription was disposed before `this.subscription` was committed to it, so the ids don't match and we no-op.
+  //   - start() declined before committing, whether a validation failed or the owner's lifetime ended: the local subscription was disposed before
+  //     `this.subscription` was committed to it, so the ids don't match and we no-op.
+  //   - the owner's signal aborted: the abort ends the subscription, and its iterator ends. When the owner also stops the buffer, as the supervisor's shutdown
+  //     does right after its abort, stop() has already cleared `this.subscription` and we no-op; otherwise the ids match and we self-clean.
   //   - terminal typed error (e.g., ProtectLivestreamUnavailableError): the subscription was committed and is now disposed without our teardown running, so the ids
   //     match and we reset backing state to match reality via finalizeSubscription.
   //   - session-level termination (controller manager shutdown): the subscription's iterator closes from outside, the ids match, and we self-clean.
@@ -249,8 +280,8 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
 
     this.log.warn("Rebooting the camera to recover its livestream after %s failed reconnection attempts.", error.attempts.toString());
 
-    this.protectCamera.reboot().catch((rebootError: unknown) => this.log.error("The camera could not be rebooted during livestream self-healing.",
-      { error: rebootError }));
+    this.protectCamera.reboot().catch((rebootError: unknown) => this.log.error("The camera could not be rebooted during livestream self-healing: %s.",
+      formatErrorMessage(rebootError)));
   }
 
   // Reset transmit-session state after the backing subscription has ended. Called from both stop() (explicit teardown) and the consumeSegments finally
@@ -262,6 +293,7 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
   // downstream stall timeouts (FFmpeg's internal timeout is 6-8 seconds). When not transmitting, no consumer cares and the emit would be noise.
   private finalizeSubscription(): void {
 
+    const wasStarted = this.isStarted;
     const wasTransmitting = this._isTransmitting;
     const cause = this._pendingStopCause;
 
@@ -276,9 +308,15 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
       this.emit("terminated");
     }
 
-    // The supervisor listens for this on every teardown, transmitting or not, so it can decide whether to re-establish immediately ("ended") or leave the revival to
-    // the availability edge ("giveUp"). Reset the pending cause afterward so the next teardown defaults to the recoverable case unless the iterator raises it again.
-    this.emit("stopped", cause);
+    // `stopped` reports every genuine teardown, transmitting or not, and only those: a stop that found nothing running tore nothing down and reports nothing. Listeners
+    // read it to decide whether to re-establish immediately ("ended") or leave the revival to the availability edge ("giveUp"), so an emission from a teardown that
+    // never happened would ask them to answer for an event with no cause. Reset the pending cause afterward - unconditionally, so a declined teardown cannot strand a
+    // raised cause - and the next teardown defaults to the recoverable case unless the iterator raises it again.
+    if(wasStarted) {
+
+      this.emit("stopped", cause);
+    }
+
     this._pendingStopCause = "ended";
   }
 
@@ -355,7 +393,8 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
 
   // Stop timeshifting the livestream. Dispose the subscription (the subscription's internal disposal handles its own listeners, decrements the reference count
   // on the shared session, and tears down the underlying connection if we were the last subscriber) then route through finalizeSubscription to reset state and
-  // fire the terminated emit if a transmit session was active.
+  // fire the terminated emit if a transmit session was active. Safe to call more than once, and safe to call on a buffer that never started: a stop that finds no
+  // subscription resets state that is already at rest and emits nothing, so callers never need to check first.
   public stop(): boolean {
 
     if(this.subscription) {
@@ -382,8 +421,9 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
   public transmitStart(startIndex?: number): Nullable<number> {
 
     // Precondition: the timeshift buffer must already be started and have received its initialization segment before transmission can begin. The HKSV recording
-    // delegate reconciles via configureTimeshifting before invoking transmitStart, so reaching this method without the timeshift running indicates a contract
-    // violation or a livestream that failed to establish. Surfacing this as an error preserves the single-entry invariant the reconciler relies on.
+    // delegate invokes transmitStart only once the buffer holds a committed channel profile and a full window of media, so reaching this method without the timeshift
+    // running indicates a contract violation or a livestream that died after that check. Surfacing this as an error preserves the single-entry rule the reconciler
+    // relies on.
     if(!this.subscription?.initSegment) {
 
       this.log.error("HKSV event recording unavailable: the livestream connection is not ready. This can occur when the Protect controller or camera is " +
@@ -512,6 +552,13 @@ export class ProtectTimeshiftBuffer extends EventEmitter<TimeshiftBufferEvents> 
     // If we don't have our fMP4 initialization segment, we're done. Otherwise, return the current timeshift buffer in full.
     return (this.subscription?.initSegment && this._segments.length) ?
       Buffer.concat([ this.subscription.initSegment.data, ...this._segments.map((s) => s.data) ]) : null;
+  }
+
+  // Return the audio format the running livestream carries, read from its init segment's description, or null when the buffer is not running or the stream has no
+  // readable audio track. The recording path reads it to decide whether a recording copies the stream's audio or transcodes it to the format HomeKit selected.
+  public get audioFormat(): LivestreamAudioFormat | null {
+
+    return this.subscription?.initSegment ? livestreamAudioFormat(this.subscription.initSegment.description) : null;
   }
 
   // Return the channel profile the running livestream is backed by, or null when the buffer is not running. Kept as a matched pair with `isStarted` on every start

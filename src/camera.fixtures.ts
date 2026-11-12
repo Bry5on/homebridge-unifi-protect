@@ -12,8 +12,9 @@
  * When a later change intentionally alters that behavior, the diff lands HERE as a reviewed change to a checked-in value - the
  * golden-master flags exactly the rows that move, and nothing else.
  *
- * makeChannel fills a complete ProtectCameraChannelConfig from the load-bearing fields (the resolution math reads only name/width/height/fps; isRtspEnabled filters the
- * primary channel; id and rtspAlias compose the URL). The remaining interface fields are filled with inert defaults so the corpus is a real typed channel, not a cast.
+ * makeChannel fills a complete ProtectCameraChannelConfig from the fields the resolution math actually reads (name/width/height/fps; isRtspEnabled filters the
+ * per-consumer RTSP-enabled view; id and rtspAlias compose the URL). The remaining interface fields are filled with inert defaults so the corpus is a real typed channel,
+ * not a cast.
  * The rtspAlias is synthesized from the id so the URL is stable and deterministic; it never affects the resolution math, only the URL string, which
  * production composes the same way every time.
  */
@@ -49,8 +50,8 @@ export interface PackageFixture {
   nativeTop: Resolution;
 }
 
-// Build a complete typed channel from the load-bearing fields. The defaults are inert - the resolution math never reads them - and rtspAlias is synthesized from the id
-// so URLs are deterministic.
+// Build a complete typed channel from the fields the resolution math reads. The remaining defaults are inert - the resolution math never reads them - and rtspAlias is
+// synthesized from the id so URLs are deterministic.
 export function makeChannel(options: { fps: number; height: number; id: number; isRtspEnabled?: boolean; name: string; width: number }): ProtectCameraChannelConfig {
 
   return {
@@ -133,8 +134,8 @@ export const C5_WITNESS_CHANNELS: ProtectCameraChannelConfig[] = [
   makeChannel({ fps: 15, height: 360, id: 1, name: "Low", width: 480 })
 ];
 
-// A synthetic regime with a disabled Medium channel: isPrimaryChannel gates on isRtspEnabled, so channel 1 is dropped from the native list and never appears in the
-// advertised output. Exercises the RTSP-enable filtering boundary.
+// A synthetic regime with a disabled Medium channel: channel 1 is advertised and substrate-selectable like any other primary channel, because the livestream API serves
+// it regardless of the flag...only the RTSP-consuming views (the direct-RTSP selector and the RTSP snapshot source) exclude it. Exercises that split.
 export const MIXED_RTSP_DISABLED_CHANNELS: ProtectCameraChannelConfig[] = [
 
   makeChannel({ fps: 30, height: 2160, id: 0, name: "High", width: 3840 }),
@@ -321,3 +322,21 @@ export const PACKAGE_FIXTURES: PackageFixture[] = [
     nativeTop: [ 1600, 1200, 2 ]
   }
 ];
+
+// The init segment an Amcrest camera's livestream delivered through Protect, captured from the controller and checked in byte for byte: H.264 Main at 2592 by
+// 1944 beside one AAC-LC audio track at 8000 Hz in one channel, the stream a camera whose audio differs from the recording stand-in carries. The probe and buffer
+// tests describe it through unifi-protect's own describeInitSegment, so what they read is what the controller's bytes say.
+export const AMCREST_INIT_SEGMENT = Buffer.from([
+
+  "AAAAIGZ0eXBkYXNoAAAAAGlzbzZodmMxYXZjMW1wNDEAAAR+bW9vdgAAAGxtdmhkAAAAAObxoLPm8aCzAAAD6AAAAAAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAA",
+  "AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAEhtdmV4AAAAIHRyZXgAAAAAAAAAAQAAAAEAAAjKAAAAAAABAAAAAAAgdHJleAAAAAAAAAACAAAAAQAABAAAAAAAAAAAAAAAAgJ0cmFr",
+  "AAAAXHRraGQAAAAH5vGgs+bxoLMAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAACiAAAAeYAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAA",
+  "AAEAAAAAAAAAAAABAAAAAAF6bWRpYQAAACBtZGhkAAAAAObxoLPm8aCzAAFfkAAAAABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABJW1pbmYAAAAUdm1o",
+  "ZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAOVzdGJsAAAAmXN0c2QAAAAAAAAAAQAAAIlhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAACiAHmABIAAAA",
+  "SAAAAAAAAAABFlViaXF1aXRpIE1lZGlhIFNlcnZlciAAAAAAAAAAAAAAGP//AAAAM2F2Y0MBTUAz/+EAG2dNQDOmgCiA9flm4CAgKAAAAwAIAAADAUQgAAEABWjuPIAAAAAAEHN0dHMAAAAAAAAAAAAA",
+  "ABBzdHNjAAAAAAAAAAAAAAAUc3RzegAAAAAAAAAAAAAAAAAAABBzdGNvAAAAAAAAAAAAAAHAdHJhawAAAFx0a2hkAAAAB+bxoLPm8aCzAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAAA",
+  "AAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAJGVkdHMAAAAcZWxzdAAAAAAAAAABAAAAAAAAAAAAAQAAAAABOG1kaWEAAAAgbWRoZAAAAADm8aCz5vGgswAAH0AAAAAAVcQAAAAA",
+  "AC1oZGxyAAAAAAAAAABzb3VuAAAAAAAAAAAAAAAAU291bmRIYW5kbGVyAAAAAONtaW5mAAAAEHNtaGQAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAKdzdGJsAAAA",
+  "W3N0c2QAAAAAAAAAAQAAAEttcDRhAAAAAAAAAAEAAAAAAAAAAAACABAAAAAAH0AAAAAAACdlc2RzAAAAAAMZAAIABBFAFQAAAAAAAAAAAAAABQIViAYBAgAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAA",
+  "AAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAA"
+].join(""), "base64");
