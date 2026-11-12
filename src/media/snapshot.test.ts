@@ -13,7 +13,7 @@
  * next source. The freshness DECISION itself - whether the buffer reads fresh, stale, or empty - is covered directly over ProtectTimeshiftBuffer in timeshift.test.ts.
  */
 import type { HedgedSnapshot, SnapshotAttempt } from "./snapshot.ts";
-import { ProtectSnapshot, hedgeSnapshotAttempts, snapshotCutoff } from "./snapshot.ts";
+import { ProtectSnapshot, hedgeSnapshotAttempts, snapshotCutoff, snapshotScaleFilters } from "./snapshot.ts";
 import type { TestClock, TestLogEntry } from "homebridge-plugin-utils/testing";
 import { TestStreamingDelegate, makeTimeshiftSupervisorDouble } from "../testing.helpers.ts";
 import { after, describe, test } from "node:test";
@@ -544,5 +544,41 @@ describe("hedgeSnapshotAttempts - a slow RTSP attempt hedged by a delayed contro
 
     assert.equal(await resolved(run), null, "the hedge answers nothing once the acquisition has ended");
     assert.deepEqual(run.atResolve, { apiAborted: true, apiSettled: true, rtspAborted: true, rtspSettled: true }, "every attempt ended with the acquisition");
+  });
+});
+
+describe("snapshotScaleFilters: portrait sources keep their native aspect ratio", () => {
+
+  test("landscape sources keep the fit-and-pad behavior", () => {
+
+    assert.deepEqual(snapshotScaleFilters({ height: 360, width: 640 }, false),
+      [ "scale=640:360:force_original_aspect_ratio=decrease", "pad=640:360:(ow-iw)/2:(oh-ih)/2" ]);
+  });
+
+  test("portrait sources cover the requested dimensions at their native aspect ratio, with no padding", () => {
+
+    const filters = snapshotScaleFilters({ height: 360, width: 640 }, true);
+
+    assert.deepEqual(filters, [ "scale=w=min(iw\\, max(640\\, 360 * iw / ih)):h=-2", "setsar=1" ]);
+    assert.equal(filters.some((filter) => filter.startsWith("pad=")), false);
+  });
+});
+
+describe("ProtectSnapshot portrait sources are not letterboxed, whichever source wins", () => {
+
+  // The timeshift and RTSP sources both pass the channel's orientation into snapshotScaleFilters (a crop forces the letterbox path instead). The controller source
+  // never enters that pipeline: its JPEG is the controller's own snapshot, which already keeps the native aspect, so the bytes that win are the bytes it returned.
+  test("a controller snapshot that wins a landscape request is returned unchanged", async () => {
+
+    const { host, snapshot } = buildSnapshot("empty");
+    const image = Buffer.from("controller-native-aspect");
+
+    host.snapshotFromController = (): Promise<Buffer> => Promise.resolve(image);
+
+    const result = await snapshot.getSnapshot({ height: 360, width: 640 });
+
+    await settle();
+
+    assert.equal(result, image, "the winning controller image was not re-encoded through a pad filter");
   });
 });

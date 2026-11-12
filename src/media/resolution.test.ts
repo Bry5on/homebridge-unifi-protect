@@ -17,7 +17,8 @@
 import { AI_PRO_CHANNELS, C5_WITNESS_CHANNELS, CAMERA_FIXTURES, FIXTURE_HOST, FIXTURE_RTSPS_PORT, G6_PRO_ENTRY_CHANNELS, MIXED_RTSP_DISABLED_CHANNELS, PACKAGE_FIXTURES,
   SANITY_FAIL_CHANNELS, makeChannel } from "../camera.fixtures.ts";
 import type { ChannelProfile, SelectRequest } from "./resolution.ts";
-import { buildAdvertisedProfiles, buildAdvertisedResolutions, buildChannelProfile, capByPixels, isPrimaryChannel, rtspUrl, selectChannelProfile } from "./resolution.ts";
+import { buildAdvertisedProfiles, buildAdvertisedResolutions, buildChannelProfile, capByPixels, isPortraitResolution, isPrimaryChannel, rtspUrl,
+  selectChannelProfile } from "./resolution.ts";
 import { describe, test } from "node:test";
 import type { Nullable } from "homebridge-plugin-utils";
 import type { ProtectCameraChannelConfig } from "unifi-protect";
@@ -306,5 +307,19 @@ describe("resolution: rtspUrl - the host forms", () => {
   test("an IPv6 address carrying a zone is refused", () => {
 
     assert.throws(() => rtspUrl(channel, "fe80::1%en0", 7441), TypeError, "a zone has no place in a URL");
+  });
+});
+
+describe("resolution: isPortraitResolution", () => {
+
+  test("a doorbell frame taller than it is wide is portrait", () => {
+
+    assert.equal(isPortraitResolution(1504, 2016), true);
+  });
+
+  test("a landscape frame and a square frame are not portrait", () => {
+
+    assert.equal(isPortraitResolution(1920, 1080), false);
+    assert.equal(isPortraitResolution(1080, 1080), false);
   });
 });
