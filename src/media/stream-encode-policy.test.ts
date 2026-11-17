@@ -4,11 +4,12 @@
  *
  * Each is a pure function - no `this`, no I/O - so every cell is provable against constructed inputs, the property that makes pure decision modules exhaustively
  * testable in a way `this`-bound logic is not. The transcode table walks each circumstance that forces a re-encode and the high-latency packet-time boundary; the
- * channel-request table walks the transcode and hardware-encoder axes; the encoding table walks the bitrate hints, the channel ceiling, the copy-mode transmux, and
- * every axis of the interpolation predicate.
+ * channel-request table walks the transcode and hardware-encoder axes; the encoding table walks the bitrate hints, the channel ceiling, the copy-mode transmux,
+ * every axis of the interpolation predicate, and the portrait height floor.
  */
 import { H264Level, H264Profile, HOMEKIT_IDR_INTERVAL } from "homebridge-plugin-utils";
-import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH } from "../settings.ts";
+import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH, PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT }
+  from "../settings.ts";
 import { describe, test } from "node:test";
 import { resolveChannelRequest, resolveTranscodeDecision, resolveVideoEncoding } from "./stream-encode-policy.ts";
 import type { VideoEncoderOptions } from "homebridge-plugin-utils";
@@ -28,13 +29,15 @@ function channelInput(overrides: Partial<Parameters<typeof resolveChannelRequest
   return { isTranscoding: false, requestHeight: 1080, requestWidth: 1920, usesHardwareEncoder: false, ...overrides };
 }
 
-// The neutral encoding input: a copy-mode direct-RTSP session on a plain Linux host, HomeKit asking for 1920x1080@30 at 3000 kbps, fed by a 30 fps channel whose own
-// ceiling of 6000 kbps sits above the request, from an H.264 camera, with no configured transcode bitrates. Every bitrate here is in kbps.
+// The neutral encoding input: a copy-mode direct-RTSP session on a plain Linux host, HomeKit asking for 1920x1080@30 at 3000 kbps, fed by a 1920x1080 30 fps channel
+// whose own ceiling of 6000 kbps sits above the request, from an H.264 camera, with no configured transcode bitrates, no crop, and average bitrate off. The source is
+// landscape and the encoder is software, so the portrait floor stays off unless a test turns it on. Every bitrate here is in kbps.
 function encodingInput(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
 
-  return { channelBitrate: 6000, channelFps: 30, cpuGeneration: 0, hostSystem: "linux", isHighLatency: false, isPackageCamera: false, isTranscoding: false,
-    requestBitrate: 3000, requestFps: 30, requestHeight: 1080, requestLevel: H264Level.LEVEL4_0, requestProfile: H264Profile.MAIN, requestWidth: 1920,
-    transcodeBitrate: 0, transcodeHighLatencyBitrate: 0, useTsb: false, videoCodec: "h264", ...overrides };
+  return { averageBitrate: false, channelBitrate: 6000, channelFps: 30, channelHeight: 1080, channelWidth: 1920, cpuGeneration: 0, crop: false, hostSystem: "linux",
+    isHighLatency: false, isPackageCamera: false, isTranscoding: false, requestBitrate: 3000, requestFps: 30, requestHeight: 1080, requestLevel: H264Level.LEVEL4_0,
+    requestProfile: H264Profile.MAIN, requestWidth: 1920, transcodeBitrate: 0, transcodeHighLatencyBitrate: 0, useTsb: false, usesHardwareEncoder: false,
+    videoCodec: "h264", ...overrides };
 }
 
 // The encoder-options bag the neutral encoding input is expected to produce once transcoding is on: HomeKit's request in full, the camera's H.264 source codec, the
@@ -258,5 +261,192 @@ describe("resolveVideoEncoding - the interpolation predicate", () => {
 
     assert.deepEqual(resolveVideoEncoding(encodingInput({ ...interpolating, useTsb: false })),
       { encoderOptions: transcodeBag({ inputFps: 15 }), mode: "transcode", targetBitrate: 3000 });
+  });
+});
+
+describe("resolveVideoEncoding - portrait livestreams", () => {
+
+  // A UniFi Protect Doorbell Lite channel, 1504x2016 at 24 fps, transcoded on Apple Silicon's hardware encoder with no crop and average bitrate off. HomeKit's request
+  // is filled in per test. The two height floors are the sizes the Home app was tuned against: 1080 low-latency (806x1080) and 720 high-latency (538x720). The fit box
+  // is that realized frame on both axes, because the scaler fits inside the requested width and height together.
+  function doorbell(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
+
+    return encodingInput({
+
+      channelFps: 24,
+      channelHeight: 2016,
+      channelWidth: 1504,
+      hostSystem: "macOS.Apple",
+      isTranscoding: true,
+      requestFps: 30,
+      usesHardwareEncoder: true,
+      ...overrides
+    });
+  }
+
+  test("the portrait height floors are 1080, and 720 for a high-latency client", () => {
+
+    assert.equal(PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT, 1080);
+    assert.equal(PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT, 720);
+  });
+
+  test("a 1280x720 request and a 640x360 request both send 806x1080 at the camera's 24 fps, still quality-constrained", () => {
+
+    for(const request of [ { height: 720, width: 1280 }, { height: 360, width: 640 } ]) {
+
+      assert.deepEqual(resolveVideoEncoding(doorbell({ requestHeight: request.height, requestWidth: request.width })), {
+
+        encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, width: 806 }),
+        mode: "transcode",
+        portraitOutput: { height: 1080, width: 806 },
+        targetBitrate: 3000
+      });
+    }
+  });
+
+  test("average bitrate is applied to that raised frame only when the user has turned it on", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ averageBitrate: true, requestHeight: 360, requestWidth: 640 })), {
+
+      encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, smartQuality: false, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
+
+    // A request already at the floor is not a raised frame, so the option changes nothing about it.
+    assert.deepEqual(resolveVideoEncoding(doorbell({ averageBitrate: true, requestHeight: 1080, requestWidth: 1920 })),
+      { encoderOptions: transcodeBag({ height: 1080, inputFps: 24, width: 1920 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a high-latency 320x240 request sends 538x720, and average bitrate keeps the high-latency bitrate", () => {
+
+    const request = { isHighLatency: true, requestHeight: 240, requestWidth: 320, transcodeHighLatencyBitrate: 1000 };
+    const raised = { bitrate: 1000, fps: 24, height: 720, inputFps: 24, width: 538 };
+
+    assert.deepEqual(resolveVideoEncoding(doorbell(request)), {
+
+      encoderOptions: transcodeBag(raised),
+      mode: "transcode",
+      portraitOutput: { height: 720, width: 538 },
+      targetBitrate: 1000
+    });
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ ...request, averageBitrate: true })), {
+
+      encoderOptions: transcodeBag({ ...raised, smartQuality: false }),
+      mode: "transcode",
+      portraitOutput: { height: 720, width: 538 },
+      targetBitrate: 1000
+    });
+  });
+
+  test("a request already at the floor is not raised, and a high-latency request already at 720 is not either", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ requestHeight: 1080, requestWidth: 1920 })),
+      { encoderOptions: transcodeBag({ height: 1080, inputFps: 24, width: 1920 }), mode: "transcode", targetBitrate: 3000 });
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, requestHeight: 720, requestWidth: 1280 })),
+      { encoderOptions: transcodeBag({ height: 720, inputFps: 24, width: 1280 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("the realized frame is capped at the source, so a short portrait source is never enlarged", () => {
+
+    // 600x900 is portrait and shorter than the 1080 floor, but taller than the 360 request, so the box is the source itself.
+    assert.deepEqual(resolveVideoEncoding(doorbell({ channelHeight: 900, channelWidth: 600, requestHeight: 360, requestWidth: 640 })), {
+
+      encoderOptions: transcodeBag({ fps: 24, height: 900, inputFps: 24, width: 600 }),
+      mode: "transcode",
+      portraitOutput: { height: 900, width: 600 },
+      targetBitrate: 3000
+    });
+
+    // A source shorter than the request is not a raise. The request's own box already contains it, and the fit refuses to enlarge.
+    assert.deepEqual(resolveVideoEncoding(doorbell({ channelHeight: 500, channelWidth: 400, requestHeight: 720, requestWidth: 1280 })),
+      { encoderOptions: transcodeBag({ height: 720, inputFps: 24, width: 1280 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a source frame rate above the request is not raised, and a zero source frame rate keeps the request", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ channelFps: 40, requestHeight: 360, requestWidth: 640 })), {
+
+      encoderOptions: transcodeBag({ fps: 30, height: 1080, inputFps: 40, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ channelFps: 0, requestHeight: 360, requestWidth: 640 })), {
+
+      encoderOptions: transcodeBag({ fps: 30, height: 1080, inputFps: 0, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
+  });
+
+  test("a landscape camera on the same Apple Silicon hardware encoder is unchanged", () => {
+
+    assert.deepEqual(resolveVideoEncoding(encodingInput({ hostSystem: "macOS.Apple", isTranscoding: true, requestHeight: 360, requestWidth: 640,
+      usesHardwareEncoder: true })),
+    { encoderOptions: transcodeBag({ height: 360, width: 640 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a portrait source encoded in software, on a non-Apple host, or with a crop configured is unchanged", () => {
+
+    const request = { requestHeight: 360, requestWidth: 640 };
+    const unchanged = { encoderOptions: transcodeBag({ height: 360, inputFps: 24, width: 640 }), mode: "transcode" as const, targetBitrate: 3000 };
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ ...request, usesHardwareEncoder: false })), unchanged);
+    assert.deepEqual(resolveVideoEncoding(doorbell({ ...request, hostSystem: "linux" })), unchanged);
+    assert.deepEqual(resolveVideoEncoding(doorbell({ ...request, crop: true })), unchanged);
+  });
+
+  test("a copy-mode session of a portrait source is still a copy", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isTranscoding: false })), { mode: "copy", targetBitrate: 3000, transmux: false });
+  });
+
+  test("the minterpolate path keeps its channel frame rate and filters when a portrait source is raised", () => {
+
+    // Channel fps sits above the request so a portrait native-fps choice (min of the two) would be distinguishable from interpolation's channel rate.
+    const filters = [ "fps=30", "minterpolate=fps=30:mi_mode=mci:mc_mode=aobmc:me=fss:me_mode=bidir:vsbmc=1:scd=none" ];
+    const upsized = { channelFps: 40, cpuGeneration: 3, requestHeight: 360, requestWidth: 640, useTsb: true };
+
+    assert.deepEqual(resolveVideoEncoding(doorbell(upsized)), {
+
+      encoderOptions: transcodeBag({ fps: 40, height: 1080, inputFps: 40, videoFilters: filters, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ ...upsized, averageBitrate: true })), {
+
+      encoderOptions: transcodeBag({ fps: 40, height: 1080, inputFps: 40, smartQuality: false, videoFilters: filters, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
+
+    // An M1 (generation 1) does not interpolate. The same portrait source takes the requested frame rate, which is below the channel's, and no minterpolate filters.
+    assert.deepEqual(resolveVideoEncoding(doorbell({ channelFps: 40, cpuGeneration: 1, requestHeight: 360, requestWidth: 640, useTsb: true })), {
+
+      encoderOptions: transcodeBag({ fps: 30, height: 1080, inputFps: 40, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
+  });
+
+  test("a package camera is still raised, and still excluded from interpolation", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ cpuGeneration: 3, isPackageCamera: true, requestHeight: 360, requestWidth: 640, useTsb: true })), {
+
+      encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, width: 806 }),
+      mode: "transcode",
+      portraitOutput: { height: 1080, width: 806 },
+      targetBitrate: 3000
+    });
   });
 });
