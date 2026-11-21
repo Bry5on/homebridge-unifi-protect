@@ -92,6 +92,16 @@ describe("feature-option retirement wave", () => {
     }
   });
 
+  // Average bitrate for a raised portrait livestream is opt-in. Off, the catalog default, the encoder keeps the quality-constrained mode every other transcode uses.
+  test("portrait average-bitrate encoding is off until the user turns it on", () => {
+
+    const entry = optionEntry("Video", "Transcode.AverageBitrate");
+
+    assert.ok(entry, "the average-bitrate option is in the Video catalog");
+    assert.equal(entry.default, false, "the option is off by default, so a stock encode stays quality-constrained");
+    assert.equal(entry.group, undefined, "the option stands on its own rather than inside another transcode group");
+  });
+
   // The Video category's direct-RTSP pin is present, and the superseded Stream.UseApi toggle and Stream.Only.* pins are absent from the category.
   test("the direct-RTSP pin replaced the streaming options in the Video category", () => {
 
