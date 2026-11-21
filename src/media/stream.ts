@@ -803,7 +803,6 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
     // controller in bits per second and the policy works in kbps throughout, so we convert it here at the boundary.
     const encoding = resolveVideoEncoding({
 
-      averageBitrate: this.protectCamera.hints.transcodeAverageBitrate,
       channelBitrate: channelProfile.channel.bitrate / 1000,
       channelFps: channelProfile.channel.fps,
       channelHeight: channelProfile.channel.height,

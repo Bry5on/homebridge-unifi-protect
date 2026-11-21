@@ -102,7 +102,6 @@ export class TestCameraHost implements ProtectCameraHost {
     standalone: false,
     substrateDefault: "",
     transcode: false,
-    transcodeAverageBitrate: false,
     transcodeBitrate: 0,
     transcodeHighLatency: false,
     transcodeHighLatencyBitrate: 0,

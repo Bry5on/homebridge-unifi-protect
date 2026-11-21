@@ -63,8 +63,7 @@ const DEVICE_FEATURES: DeviceFeature[] = [
     withoutHardware: {} },
   { kindLabel: "HKSV recording switches", label: "HKSV recording switch", option: "Video.HKSV.Recording.Switch", withoutHardware: NO_MOTION },
   { label: "UniFi Protect recording switches", option: "Nvr.Recording.Switch" },
-  { defaultOn: true, label: "Higher quality snapshots", option: "Video.HighResSnapshots" },
-  { label: "Average-bitrate portrait transcoding", option: "Video.Transcode.AverageBitrate" }
+  { defaultOn: true, label: "Higher quality snapshots", option: "Video.HighResSnapshots" }
 ];
 
 // The same, for an option a controller reads with no device beneath it, each standing up its owner on the double.

@@ -116,9 +116,6 @@ export interface ProtectCameraHints extends ProtectHints {
   // Whether the camera's video stream is transcoded rather than passed through.
   transcode: boolean;
 
-  // Whether a portrait livestream that is sent larger than HomeKit asked for is encoded at a fixed average bitrate. Off leaves the encoder's quality-constrained mode.
-  transcodeAverageBitrate: boolean;
-
   // The target bitrate, in kilobits per second, used when transcoding; -1 leaves the bitrate unconstrained.
   transcodeBitrate: number;
 
@@ -275,7 +272,6 @@ export class ProtectCamera extends ProtectDevice<Camera> implements ProtectCamer
       smartDetect: smartDetect,
       smartDetectSensors: smartDetect && this.hasFeature("Motion.SmartDetect.ObjectSensors"),
       transcode: this.hasFeature("Video.Transcode"),
-      transcodeAverageBitrate: this.hasFeature("Video.Transcode.AverageBitrate"),
       transcodeBitrate: this.getFeatureNumber("Video.Transcode.Bitrate") ?? -1,
       transcodeHighLatency: this.hasFeature("Video.Transcode.HighLatency"),
       transcodeHighLatencyBitrate: this.getFeatureNumber("Video.Transcode.HighLatency.Bitrate") ?? -1,
@@ -1679,9 +1675,6 @@ export class ProtectCamera extends ProtectDevice<Camera> implements ProtectCamer
 
     // Inform the user if they've selected the legacy snapshot API.
     this.announceFeature({ label: "Higher quality snapshots", option: "Video.HighResSnapshots" });
-
-    // Inform the user if a raised portrait livestream should be encoded at a fixed average bitrate. Off, the default, keeps the encoder's quality-constrained mode.
-    this.announceFeature({ label: "Average-bitrate portrait transcoding", option: "Video.Transcode.AverageBitrate" });
   }
 
   /* The camera family's registration HOST HOOK, called by the composed streaming capability directly after it registers this camera's CameraController. Registering a

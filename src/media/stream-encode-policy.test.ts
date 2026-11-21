@@ -30,12 +30,12 @@ function channelInput(overrides: Partial<Parameters<typeof resolveChannelRequest
 }
 
 // The neutral encoding input: a copy-mode direct-RTSP session on a plain Linux host, HomeKit asking for 1920x1080@30 at 3000 kbps, fed by a 1920x1080 30 fps channel
-// whose own ceiling of 6000 kbps sits above the request, from an H.264 camera, with no configured transcode bitrates, no crop, and average bitrate off. The source is
-// landscape and the encoder is software, so the portrait floor stays off unless a test turns it on. Every bitrate here is in kbps.
+// whose own ceiling of 6000 kbps sits above the request, from an H.264 camera, with no configured transcode bitrates and no crop. The source is landscape and the
+// encoder is software, so the portrait floor stays off unless a test turns it on. Every bitrate here is in kbps.
 function encodingInput(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
 
-  return { averageBitrate: false, channelBitrate: 6000, channelFps: 30, channelHeight: 1080, channelWidth: 1920, crop: false, hostSystem: "linux",
-    isHighLatency: false, isTranscoding: false, requestBitrate: 3000, requestFps: 30, requestHeight: 1080, requestLevel: H264Level.LEVEL4_0,
+  return { channelBitrate: 6000, channelFps: 30, channelHeight: 1080, channelWidth: 1920, crop: false, hostSystem: "linux", isHighLatency: false,
+    isTranscoding: false, requestBitrate: 3000, requestFps: 30, requestHeight: 1080, requestLevel: H264Level.LEVEL4_0,
     requestProfile: H264Profile.MAIN, requestWidth: 1920, transcodeBitrate: 0, transcodeHighLatencyBitrate: 0, useTsb: false, usesHardwareEncoder: false,
     videoCodec: "h264", ...overrides };
 }
@@ -242,9 +242,9 @@ describe("resolveVideoEncoding - the bitrate hints and the channel's ceiling", (
 
 describe("resolveVideoEncoding - portrait livestreams", () => {
 
-  // A UniFi Protect Doorbell Lite channel, 1504x2016 at 24 fps, transcoded on Apple Silicon's hardware encoder with no crop and average bitrate off. HomeKit's request
-  // is filled in per test. The two height floors are the sizes the Home app was tuned against: 1080 low-latency (806x1080) and 720 high-latency (538x720). The fit box
-  // is that realized frame on both axes, because the scaler fits inside the requested width and height together.
+  // A UniFi Protect Doorbell Lite channel, 1504x2016 at 24 fps, transcoded on Apple Silicon's hardware encoder with no crop. HomeKit's request is filled in per test.
+  // The two height floors are the sizes the Home app was tuned against: 1080 low-latency (806x1080) and 720 high-latency (538x720). The fit box is that realized frame
+  // on both axes, because the scaler fits inside the requested width and height together.
   function doorbell(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
 
     return encodingInput({
@@ -266,7 +266,7 @@ describe("resolveVideoEncoding - portrait livestreams", () => {
     assert.equal(PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT, 720);
   });
 
-  test("a 1280x720 request and a 640x360 request both send 806x1080 at the camera's 24 fps, still quality-constrained", () => {
+  test("a 1280x720 request and a 640x360 request both send 806x1080 at the camera's 24 fps", () => {
 
     for(const request of [ { height: 720, width: 1280 }, { height: 360, width: 640 } ]) {
 
@@ -280,37 +280,11 @@ describe("resolveVideoEncoding - portrait livestreams", () => {
     }
   });
 
-  test("average bitrate is applied to that raised frame only when the user has turned it on", () => {
+  test("a high-latency 320x240 request sends 538x720 at the high-latency bitrate", () => {
 
-    assert.deepEqual(resolveVideoEncoding(doorbell({ averageBitrate: true, requestHeight: 360, requestWidth: 640 })), {
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, requestHeight: 240, requestWidth: 320, transcodeHighLatencyBitrate: 1000 })), {
 
-      encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, smartQuality: false, width: 806 }),
-      mode: "transcode",
-      portraitOutput: { height: 1080, width: 806 },
-      targetBitrate: 3000
-    });
-
-    // A request already at the floor is not a raised frame, so the option changes nothing about it. The paced rate still applies: the 24 fps source is not padded to 30.
-    assert.deepEqual(resolveVideoEncoding(doorbell({ averageBitrate: true, requestHeight: 1080, requestWidth: 1920 })),
-      { encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, width: 1920 }), mode: "transcode", targetBitrate: 3000 });
-  });
-
-  test("a high-latency 320x240 request sends 538x720, and average bitrate keeps the high-latency bitrate", () => {
-
-    const request = { isHighLatency: true, requestHeight: 240, requestWidth: 320, transcodeHighLatencyBitrate: 1000 };
-    const raised = { bitrate: 1000, fps: 24, height: 720, inputFps: 24, width: 538 };
-
-    assert.deepEqual(resolveVideoEncoding(doorbell(request)), {
-
-      encoderOptions: transcodeBag(raised),
-      mode: "transcode",
-      portraitOutput: { height: 720, width: 538 },
-      targetBitrate: 1000
-    });
-
-    assert.deepEqual(resolveVideoEncoding(doorbell({ ...request, averageBitrate: true })), {
-
-      encoderOptions: transcodeBag({ ...raised, smartQuality: false }),
+      encoderOptions: transcodeBag({ bitrate: 1000, fps: 24, height: 720, inputFps: 24, width: 538 }),
       mode: "transcode",
       portraitOutput: { height: 720, width: 538 },
       targetBitrate: 1000
@@ -394,14 +368,6 @@ describe("resolveVideoEncoding - portrait livestreams", () => {
     assert.deepEqual(resolveVideoEncoding(doorbell(upsized)), {
 
       encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, width: 806 }),
-      mode: "transcode",
-      portraitOutput: { height: 1080, width: 806 },
-      targetBitrate: 3000
-    });
-
-    assert.deepEqual(resolveVideoEncoding(doorbell({ ...upsized, averageBitrate: true })), {
-
-      encoderOptions: transcodeBag({ fps: 24, height: 1080, inputFps: 24, smartQuality: false, width: 806 }),
       mode: "transcode",
       portraitOutput: { height: 1080, width: 806 },
       targetBitrate: 3000

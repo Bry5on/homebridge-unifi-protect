@@ -140,10 +140,8 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  *      that box produces a tiny frame the Home app then enlarges. On Apple Silicon, when this host's hardware encoder is doing the transcode and the user has not
  *      configured a crop, the fit box is raised to a minimum height (1080, or 720 for a high-latency client) and capped at the source, so we never enlarge. The box is
  *      the realized frame on both axes: homebridge-plugin-utils fits inside the requested width and height together, so a narrow request width would otherwise pinch
- *      the taller frame. Average bitrate is a separate choice, and only when the user has turned it on: otherwise the encoder keeps the quality-constrained mode it
- *      uses for every other transcode.
+ *      the taller frame. The encoder stays in the quality-constrained mode it uses for every other transcode.
  *
- * @param input.averageBitrate              - Whether a raised portrait livestream encodes at a fixed average bitrate. Off keeps quality-constrained encoding.
  * @param input.channelBitrate              - The selected source channel's bitrate ceiling, in kbps; the delegate converts it from the controller's bits per second.
  * @param input.channelFps                  - The selected source channel's frame rate.
  * @param input.channelHeight               - The selected source channel's frame height, in pixels.
@@ -166,8 +164,8 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  *
  * @returns The resolved {@link VideoEncodingDecision}.
  */
-export function resolveVideoEncoding(input: { averageBitrate: boolean; channelBitrate: number; channelFps: number; channelHeight: number; channelWidth: number;
-  crop: boolean; hostSystem: string; isHighLatency: boolean; isTranscoding: boolean; requestBitrate: number; requestFps: number; requestHeight: number;
+export function resolveVideoEncoding(input: { channelBitrate: number; channelFps: number; channelHeight: number; channelWidth: number; crop: boolean;
+  hostSystem: string; isHighLatency: boolean; isTranscoding: boolean; requestBitrate: number; requestFps: number; requestHeight: number;
   requestLevel: H264Level; requestProfile: H264Profile; requestWidth: number; transcodeBitrate: number; transcodeHighLatencyBitrate: number; useTsb: boolean;
   usesHardwareEncoder: boolean; videoCodec: string; }): VideoEncodingDecision {
 
@@ -217,9 +215,6 @@ export function resolveVideoEncoding(input: { averageBitrate: boolean; channelBi
       inputFps: input.channelFps,
       level: input.requestLevel,
       profile: input.requestProfile,
-      // Average bitrate only when the user asked for it and the realized frame is larger than HomeKit asked for. Otherwise the encoder keeps its quality-constrained
-      // default, which is what every other transcode uses.
-      ...((portrait && input.averageBitrate) ? { smartQuality: false } : {}),
       width: portrait?.width ?? input.requestWidth
     },
     mode: "transcode",
@@ -240,7 +235,7 @@ function evenScaledWidth(sourceWidth: number, sourceHeight: number, outputHeight
 // The floor applies only when we are transcoding a portrait source on Apple Silicon's hardware encoder with no crop configured. Everywhere else the request passes
 // through and nothing is narrated. The aim is the greater of the requested height and the floor; the realized height is that aim capped at the source, which is what
 // keeps a short source from being enlarged. A realized frame no taller than the request is not a raise. The frame rate is not decided here: the paced rate applies to
-// this frame and to every other transcode alike. Average bitrate is not decided here either: the caller applies it only when the user has enabled it.
+// this frame and to every other transcode alike.
 function portraitLivestream(input: { channelHeight: number; channelWidth: number; crop: boolean; hostSystem: string; isHighLatency: boolean; requestHeight: number;
   usesHardwareEncoder: boolean; }): { height: number; width: number } | undefined {
 
