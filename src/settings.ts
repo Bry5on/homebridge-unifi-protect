@@ -138,6 +138,14 @@ export const PROTECT_RPI_GPU_MINIMUM = 128;
 // Bitrate, in kilobits per second, to use when transcoding to local clients.
 export const PROTECT_TRANSCODE_BITRATE = 2000;
 
+// Minimum output height, in pixels, when transcoding a portrait livestream on Apple Silicon's hardware encoder. HomeKit typically asks for a landscape frame such as
+// 640x360, and fitting a portrait source such as the Doorbell Lite (1504x2016) inside that box produces a tiny frame the Home app then enlarges. The fit never enlarges
+// past the source, so this is a quality floor, not a forced upscale.
+export const PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT = 1080;
+
+// Minimum output height, in pixels, for the same portrait livestreams when HomeKit negotiated a high-latency session.
+export const PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT = 720;
+
 // Default interval, in hours, for scheduled NVR reboots when enabled.
 export const PROTECT_NVR_REBOOT_INTERVAL = 6;
 

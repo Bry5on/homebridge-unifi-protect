@@ -805,6 +805,10 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
 
       channelBitrate: channelProfile.channel.bitrate / 1000,
       channelFps: channelProfile.channel.fps,
+      channelHeight: channelProfile.channel.height,
+      channelWidth: channelProfile.channel.width,
+      crop: this.protectCamera.hints.crop,
+      hostSystem: this.platform.codecSupport.hostSystem,
       isHighLatency,
       isTranscoding,
       requestBitrate: request.video.max_bit_rate,
@@ -816,6 +820,7 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
       transcodeBitrate: this.protectCamera.hints.transcodeBitrate,
       transcodeHighLatencyBitrate: this.protectCamera.hints.transcodeHighLatencyBitrate,
       useTsb,
+      usesHardwareEncoder,
       videoCodec: this.protectCamera.ufp.videoCodec
     });
 
@@ -944,6 +949,13 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
     // The info line names the bitrate we target...HomeKit's own request, which HAP states in kbps, goes to the debug log beside it.
     this.log.debug("HomeKit requested up to %s for this stream, and the target bitrate is %s.", formatBps(request.video.max_bit_rate * 1000),
       formatBps(encoding.targetBitrate * 1000));
+
+    // A portrait transcode that sends more than HomeKit asked for narrates the realized frame. The size was decided by the encode policy; this is only the log line.
+    if(encoding.portraitOutput) {
+
+      this.log.info("Portrait camera: sending %sx%s, %s.", encoding.portraitOutput.width, encoding.portraitOutput.height,
+        formatBps(encoding.targetBitrate * 1000));
+    }
 
     // Render the encoding the policy resolved. The decision is already made - all that happens here is turning it into FFmpeg arguments.
     if(encoding.mode === "transcode") {
