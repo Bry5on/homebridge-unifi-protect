@@ -950,7 +950,8 @@ export class ProtectStreamingDelegate implements CameraStreamingDelegate, Stream
     this.log.debug("HomeKit requested up to %s for this stream, and the target bitrate is %s.", formatBps(request.video.max_bit_rate * 1000),
       formatBps(encoding.targetBitrate * 1000));
 
-    // A portrait transcode that sends more than HomeKit asked for narrates the realized frame. The size was decided by the encode policy; this is only the log line.
+    // A portrait transcode whose fit box differs from what HomeKit asked for narrates the realized frame, whether that frame was raised or capped. The size was decided
+    // by the encode policy; this is only the log line.
     if(encoding.portraitOutput) {
 
       this.log.info("Portrait camera: sending %sx%s, %s.", encoding.portraitOutput.width, encoding.portraitOutput.height,

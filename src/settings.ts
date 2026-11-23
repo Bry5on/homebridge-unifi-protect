@@ -143,7 +143,8 @@ export const PROTECT_TRANSCODE_BITRATE = 2000;
 // past the source, so this is a quality floor, not a forced upscale.
 export const PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT = 1080;
 
-// Minimum output height, in pixels, for the same portrait livestreams when HomeKit negotiated a high-latency session.
+// Target output height, in pixels, for the same portrait livestreams when HomeKit negotiated a high-latency session. A shorter request is raised to it and a taller one
+// is capped to it. The fit never enlarges past the source.
 export const PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT = 720;
 
 // Default interval, in hours, for scheduled NVR reboots when enabled.

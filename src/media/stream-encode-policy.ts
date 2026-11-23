@@ -132,15 +132,17 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  *      copy passes the request through untouched, since the camera's own encode is what it is.
  *   2. The output frame rate: the lower of the source channel's rate and the rate HomeKit asked for. A camera slower than the request is sent at its own rate rather
  *      than raised to HomeKit's, because the only way to raise a frame rate here is to repeat frames, and repeated frames stay on screen for uneven lengths of time...a
- *      20 fps camera padded to 30 shows its frames for 33 and 67 milliseconds by turns. A camera faster than the request has frames dropped to meet it. A raised
- *      portrait frame takes this same paced rate. The rate is not chosen again for that frame, and no interpolation filters are added.
+ *      20 fps camera padded to 30 shows its frames for 33 and 67 milliseconds by turns. A camera faster than the request has frames dropped to meet it. A portrait
+ *      frame whose size we change takes this same paced rate. The rate is not chosen again for that frame, and no interpolation filters are added.
  *   3. The encoding itself. A transcode composes the encoder-options bag homebridge-plugin-utils renders at that output rate, the same bag whichever transport feeds
  *      it, because the delegate hands FFmpeg a buffer-backed session's input one frame at a time. A copy reports only whether the input needs transmuxing.
  *   4. Portrait output, and only on a transcode. HomeKit typically asks for a landscape frame. Fitting a portrait camera such as the Doorbell Lite (1504x2016) inside
  *      that box produces a tiny frame the Home app then enlarges. On Apple Silicon, when this host's hardware encoder is doing the transcode and the user has not
- *      configured a crop, the fit box is raised to a minimum height (1080, or 720 for a high-latency client) and capped at the source, so we never enlarge. The box is
- *      the realized frame on both axes: homebridge-plugin-utils fits inside the requested width and height together, so a narrow request width would otherwise pinch
- *      the taller frame. The encoder stays in the quality-constrained mode it uses for every other transcode.
+ *      configured a crop, a local session raises the fit box to 1080 and never past the source, and leaves a request already that tall alone. A high-latency session
+ *      targets 720: a shorter request is raised to it and a taller one, such as the 960x1280 a doorbell is offered, is capped to it, still never past the source. The
+ *      box is the realized frame on both axes whenever that height differs from the request. homebridge-plugin-utils fits inside the requested width and height
+ *      together, so a narrow request width would otherwise pinch the taller frame, and a wide request would otherwise leave a cellular frame at the full request. The
+ *      encoder stays in the quality-constrained mode it uses for every other transcode.
  *
  * @param input.channelBitrate              - The selected source channel's bitrate ceiling, in kbps; the delegate converts it from the controller's bits per second.
  * @param input.channelFps                  - The selected source channel's frame rate.
@@ -190,8 +192,8 @@ export function resolveVideoEncoding(input: { channelBitrate: number; channelFps
     }
   }
 
-  // 2. Settle the output frame rate. See the ordered decision above for why a camera slower than HomeKit's request keeps its own rate. A raised portrait frame takes
-  // this same paced rate; the portrait decision below chooses a size, not a rate.
+  // 2. Settle the output frame rate. See the ordered decision above for why a camera slower than HomeKit's request keeps its own rate. A portrait frame whose size we
+  // change takes this same paced rate; the portrait decision below chooses a size, not a rate.
   const outputFps = Math.min(input.channelFps, input.requestFps);
 
   // 3. Copy the camera's stream through when we are not transcoding; the livestream API's fMP4 is the one input that needs transmuxing on the way out.
@@ -230,12 +232,13 @@ function evenScaledWidth(sourceWidth: number, sourceHeight: number, outputHeight
   return Math.round((sourceWidth * outputHeight) / (sourceHeight * 2)) * 2;
 }
 
-// The fit box for a portrait livestream that is sent larger than HomeKit asked for. Undefined when the request passes through unchanged.
+// The fit box for a portrait livestream whose height differs from what HomeKit asked for. Undefined when the request passes through unchanged.
 //
-// The floor applies only when we are transcoding a portrait source on Apple Silicon's hardware encoder with no crop configured. Everywhere else the request passes
-// through and nothing is narrated. The aim is the greater of the requested height and the floor; the realized height is that aim capped at the source, which is what
-// keeps a short source from being enlarged. A realized frame no taller than the request is not a raise. The frame rate is not decided here: the paced rate applies to
-// this frame and to every other transcode alike.
+// The decision applies only when we are transcoding a portrait source on Apple Silicon's hardware encoder with no crop configured. Everywhere else the request passes
+// through and nothing is narrated. A local session raises a short request to 1080 and never past the source, and never shrinks a request that is already taller. A
+// high-latency session targets 720: a shorter request is raised to it and a taller one is capped to it, and a source shorter than 720 still wins, so we never enlarge.
+// The frame is emitted whenever that height differs from the request, which is what lets the cellular cap through. The frame rate is not decided here: the paced rate
+// applies to this frame and to every other transcode alike.
 function portraitLivestream(input: { channelHeight: number; channelWidth: number; crop: boolean; hostSystem: string; isHighLatency: boolean; requestHeight: number;
   usesHardwareEncoder: boolean; }): { height: number; width: number } | undefined {
 
@@ -246,10 +249,13 @@ function portraitLivestream(input: { channelHeight: number; channelWidth: number
     return undefined;
   }
 
-  const floor = input.isHighLatency ? PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT : PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT;
-  const realizedHeight = Math.min(Math.max(input.requestHeight, floor), input.channelHeight);
+  // Local: raise-only, then the source cap. High-latency: 720 is the target height, so a taller request comes down as well as a shorter one going up.
+  const realizedHeight = input.isHighLatency ? Math.min(PROTECT_PORTRAIT_LIVESTREAM_HIGH_LATENCY_MIN_HEIGHT, input.channelHeight) :
+    Math.min(Math.max(input.requestHeight, PROTECT_PORTRAIT_LIVESTREAM_MIN_HEIGHT), input.channelHeight);
 
-  if(realizedHeight <= input.requestHeight) {
+  // The same height needs no fit box. A local session also refuses to shrink, so a source shorter than the request stays inside the request box. A high-latency
+  // session emits whenever the target differs, so a 960x1280 cellular request is capped instead of being dropped by a raise-only check.
+  if((realizedHeight === input.requestHeight) || (!input.isHighLatency && (realizedHeight < input.requestHeight))) {
 
     return undefined;
   }

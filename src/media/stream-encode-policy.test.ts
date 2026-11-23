@@ -243,8 +243,8 @@ describe("resolveVideoEncoding - the bitrate hints and the channel's ceiling", (
 describe("resolveVideoEncoding - portrait livestreams", () => {
 
   // A UniFi Protect Doorbell Lite channel, 1504x2016 at 24 fps, transcoded on Apple Silicon's hardware encoder with no crop. HomeKit's request is filled in per test.
-  // The two height floors are the sizes the Home app was tuned against: 1080 low-latency (806x1080) and 720 high-latency (538x720). The fit box is that realized frame
-  // on both axes, because the scaler fits inside the requested width and height together.
+  // A local session raises toward 1080 (806x1080). A high-latency session targets 720 (538x720), raising a shorter request and capping a taller one such as the
+  // 960x1280 this camera is offered. The fit box is that realized frame on both axes, because the scaler fits inside the requested width and height together.
   function doorbell(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
 
     return encodingInput({
@@ -289,6 +289,23 @@ describe("resolveVideoEncoding - portrait livestreams", () => {
       portraitOutput: { height: 720, width: 538 },
       targetBitrate: 1000
     });
+  });
+
+  test("a high-latency 960x1280 request is capped to 538x720 at the camera's 24 fps", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, requestHeight: 1280, requestWidth: 960 })), {
+
+      encoderOptions: transcodeBag({ fps: 24, height: 720, inputFps: 24, width: 538 }),
+      mode: "transcode",
+      portraitOutput: { height: 720, width: 538 },
+      targetBitrate: 3000
+    });
+  });
+
+  test("a local 960x1280 request is left at the size HomeKit asked for", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ requestHeight: 1280, requestWidth: 960 })),
+      { encoderOptions: transcodeBag({ fps: 24, height: 1280, inputFps: 24, width: 960 }), mode: "transcode", targetBitrate: 3000 });
   });
 
   test("a request already at the floor is not raised, and a high-latency request already at 720 is not either", () => {
