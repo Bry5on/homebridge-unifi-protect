@@ -4,11 +4,11 @@
  *
  * Each is a pure function - no `this`, no I/O - so every cell is provable against constructed inputs, the property that makes pure decision modules exhaustively
  * testable in a way `this`-bound logic is not. The transcode table walks each circumstance that forces a re-encode and the high-latency packet-time boundary; the
- * channel-request table walks the transcode and hardware-encoder axes; the encoding table walks the bitrate hints, the channel ceiling, the copy-mode transmux, and
- * the transcode bag, which is the same whichever transport feeds the session.
+ * channel-request table walks the transcode and hardware-encoder axes; the encoding table walks the bitrate hints, the channel ceiling, the copy-mode transmux, the
+ * transcode bag, which is the same whichever transport feeds the session, and the high-latency portrait height cap.
  */
 import { H264Level, H264Profile, HOMEKIT_IDR_INTERVAL } from "homebridge-plugin-utils";
-import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH } from "../settings.ts";
+import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH, PROTECT_PORTRAIT_HIGH_LATENCY_MAX_HEIGHT } from "../settings.ts";
 import { describe, test } from "node:test";
 import { resolveChannelRequest, resolveTranscodeDecision, resolveVideoEncoding } from "./stream-encode-policy.ts";
 import type { VideoEncoderOptions } from "homebridge-plugin-utils";
@@ -28,13 +28,14 @@ function channelInput(overrides: Partial<Parameters<typeof resolveChannelRequest
   return { isTranscoding: false, requestHeight: 1080, requestWidth: 1920, usesHardwareEncoder: false, ...overrides };
 }
 
-// The neutral encoding input: a copy-mode direct-RTSP session, HomeKit asking for 1920x1080@30 at 3000 kbps, fed by a 30 fps channel whose own ceiling of 6000 kbps
-// sits above the request, from an H.264 camera, with no configured transcode bitrates. Every bitrate here is in kbps.
+// The neutral encoding input: a copy-mode direct-RTSP session, HomeKit asking for 1920x1080@30 at 3000 kbps, fed by a 1920x1080 30 fps channel whose own ceiling of
+// 6000 kbps sits above the request, from an H.264 camera, with no configured transcode bitrates and no crop. The source is landscape, so the high-latency portrait cap
+// stays off unless a test turns it on. Every bitrate here is in kbps.
 function encodingInput(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
 
-  return { channelBitrate: 6000, channelFps: 30, isHighLatency: false, isTranscoding: false, requestBitrate: 3000, requestFps: 30, requestHeight: 1080,
-    requestLevel: H264Level.LEVEL4_0, requestProfile: H264Profile.MAIN, requestWidth: 1920, transcodeBitrate: 0, transcodeHighLatencyBitrate: 0, useTsb: false,
-    videoCodec: "h264", ...overrides };
+  return { channelBitrate: 6000, channelFps: 30, channelHeight: 1080, channelWidth: 1920, crop: false, isHighLatency: false, isTranscoding: false,
+    requestBitrate: 3000, requestFps: 30, requestHeight: 1080, requestLevel: H264Level.LEVEL4_0, requestProfile: H264Profile.MAIN, requestWidth: 1920,
+    transcodeBitrate: 0, transcodeHighLatencyBitrate: 0, useTsb: false, videoCodec: "h264", ...overrides };
 }
 
 // The encoder-options bag the neutral encoding input is expected to produce once transcoding is on: HomeKit's request in full, the camera's H.264 source codec, the
@@ -234,5 +235,73 @@ describe("resolveVideoEncoding - the bitrate hints and the channel's ceiling", (
 
     assert.deepEqual(resolveVideoEncoding(encodingInput({ channelBitrate: 1500, isTranscoding: true, transcodeBitrate: 2500 })),
       { encoderOptions: transcodeBag({ bitrate: 1500 }), mode: "transcode", targetBitrate: 1500 });
+  });
+});
+
+describe("resolveVideoEncoding - the high-latency portrait cap", () => {
+
+  // A UniFi Protect Doorbell Lite channel, 1504x2016 at 24 fps. HomeKit's cellular request for this camera is 960x1280. The cap is 720 tall at the source aspect, which
+  // is 538x720. The frame rate stays the paced rate the policy already chose.
+  function doorbell(overrides: Partial<Parameters<typeof resolveVideoEncoding>[0]> = {}): Parameters<typeof resolveVideoEncoding>[0] {
+
+    return encodingInput({
+
+      channelFps: 24,
+      channelHeight: 2016,
+      channelWidth: 1504,
+      isTranscoding: true,
+      requestFps: 30,
+      requestHeight: 1280,
+      requestWidth: 960,
+      ...overrides
+    });
+  }
+
+  test("the high-latency portrait cap is 720", () => {
+
+    assert.equal(PROTECT_PORTRAIT_HIGH_LATENCY_MAX_HEIGHT, 720);
+  });
+
+  test("a high-latency 960x1280 request is capped to 538x720 at the paced 24 fps, and the 1 Mbps target is kept", () => {
+
+    const capped = {
+
+      encoderOptions: transcodeBag({ bitrate: 1000, fps: 24, height: 720, inputFps: 24, width: 538 }),
+      mode: "transcode" as const,
+      portraitOutput: { height: 720, width: 538 },
+      targetBitrate: 1000
+    };
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, transcodeHighLatencyBitrate: 1000 })), capped);
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, transcodeHighLatencyBitrate: 1000, useTsb: true })), capped);
+  });
+
+  test("a local 960x1280 request is left at the size HomeKit asked for", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell()),
+      { encoderOptions: transcodeBag({ fps: 24, height: 1280, inputFps: 24, width: 960 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a high-latency portrait request already under 720 is not raised", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, requestHeight: 320, requestWidth: 240 })),
+      { encoderOptions: transcodeBag({ fps: 24, height: 320, inputFps: 24, width: 240 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a high-latency landscape transcode is not capped", () => {
+
+    assert.deepEqual(resolveVideoEncoding(encodingInput({ isHighLatency: true, isTranscoding: true, requestHeight: 1080, requestWidth: 1920 })),
+      { encoderOptions: transcodeBag(), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a cropped high-latency portrait transcode keeps the requested box", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ crop: true, isHighLatency: true })),
+      { encoderOptions: transcodeBag({ fps: 24, height: 1280, inputFps: 24, width: 960 }), mode: "transcode", targetBitrate: 3000 });
+  });
+
+  test("a copy-mode high-latency portrait session is still a copy", () => {
+
+    assert.deepEqual(resolveVideoEncoding(doorbell({ isHighLatency: true, isTranscoding: false })), { mode: "copy", targetBitrate: 3000, transmux: false });
   });
 });

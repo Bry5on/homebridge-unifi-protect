@@ -174,6 +174,11 @@ export const PROTECT_NVR_REMOVAL_STABILITY_WINDOW = 600000;
 // Bitrate, in kilobits per second, to use when transcoding to high-latency clients.
 export const PROTECT_TRANSCODE_HIGH_LATENCY_BITRATE = 1000;
 
+// Tallest frame, in pixels, for a portrait livestream on a high-latency session. HomeKit asks a Doorbell Lite (1504x2016) for 960x1280, and sending that whole frame at
+// the 1 Mbps high-latency bitrate stutters. The fit box is this tall, at the source aspect and an even width, and never taller than the source. A request already at or
+// under this height is left alone, and a local session is never resized.
+export const PROTECT_PORTRAIT_HIGH_LATENCY_MAX_HEIGHT = 720;
+
 // The marker for an encode running on the host's hardware encoder, the lightning bolt in its emoji presentation. It follows the HKSV acknowledgment's label and opens
 // the streaming request line when their encode runs on that encoder.
 export const HARDWARE_TRANSCODE_MARKER = "\u{26A1}\u{FE0F}";

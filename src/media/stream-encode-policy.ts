@@ -21,7 +21,7 @@
  * converts before handing it over and the module stays unit-uniform.
  */
 import type { H264Level, H264Profile, VideoEncoderOptions } from "homebridge-plugin-utils";
-import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH } from "../settings.ts";
+import { PROTECT_MAX_SOURCE_HEIGHT, PROTECT_MAX_SOURCE_WIDTH, PROTECT_PORTRAIT_HIGH_LATENCY_MAX_HEIGHT } from "../settings.ts";
 import type { ChannelBias } from "./resolution.ts";
 import { HOMEKIT_IDR_INTERVAL } from "homebridge-plugin-utils";
 
@@ -49,8 +49,9 @@ export type VideoEncoding = { mode: "copy"; transmux: boolean } |
   { encoderOptions: VideoEncoderOptions; mode: "transcode" };
 
 // The resolved encoding decision: how the video is encoded, plus the target bitrate in kbps. The bitrate sits alongside rather than inside the transcode arm because
-// the streaming-request log reports it for every session, copy-mode ones included.
-export type VideoEncodingDecision = VideoEncoding & { targetBitrate: number };
+// the streaming-request log reports it for every session, copy-mode ones included. A high-latency portrait transcode capped below the request also carries
+// `portraitOutput`, the frame the delegate narrates; every other decision omits it.
+export type VideoEncodingDecision = VideoEncoding & { portraitOutput?: { height: number; width: number }; targetBitrate: number };
 
 /**
  * Resolve whether this live view's video is re-encoded, and read the connection's latency from the negotiated audio packet time. Pure and exhaustively testable.
@@ -131,10 +132,18 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  *      than raised to HomeKit's, because the only way to raise a frame rate here is to repeat frames, and repeated frames stay on screen for uneven lengths of time...a
  *      20 fps camera padded to 30 shows its frames for 33 and 67 milliseconds by turns. A camera faster than the request has frames dropped to meet it.
  *   3. The encoding itself. A transcode composes the encoder-options bag homebridge-plugin-utils renders at that output rate, the same bag whichever transport feeds
- *      it, because the delegate hands FFmpeg a buffer-backed session's input one frame at a time. A copy reports only whether the input needs transmuxing.
+ *      it, because the delegate hands FFmpeg a buffer-backed session's input one frame at a time. A livestream read directly from the controller and one read through
+ *      UniFi OS share this bag. A copy reports only whether the input needs transmuxing.
+ *   4. A high-latency portrait cap, and only on a transcode. A cellular session asks a portrait camera such as the Doorbell Lite (1504x2016) for 960x1280 and then
+ *      encodes it at about 1 Mbps, which stutters. When the request is taller than 720, the fit box comes down to 720, or to the source when the source is shorter, at
+ *      the source aspect and an even width. A request already at or under that height is left alone, so nothing is enlarged. A local session, a landscape source, a
+ *      copy, and a configured crop are left alone. The frame rate is the paced rate from step 2.
  *
  * @param input.channelBitrate              - The selected source channel's bitrate ceiling, in kbps; the delegate converts it from the controller's bits per second.
  * @param input.channelFps                  - The selected source channel's frame rate.
+ * @param input.channelHeight               - The selected source channel's frame height, in pixels.
+ * @param input.channelWidth                - The selected source channel's frame width, in pixels.
+ * @param input.crop                        - Whether the user has configured cropping for this camera's video stream.
  * @param input.isHighLatency               - Whether HomeKit negotiated a high-latency session, from {@link resolveTranscodeDecision}.
  * @param input.isTranscoding               - Whether this session re-encodes the video, from {@link resolveTranscodeDecision}.
  * @param input.requestBitrate              - The maximum bitrate HomeKit requested, in kbps.
@@ -150,9 +159,10 @@ export function resolveChannelRequest(input: { isTranscoding: boolean; requestHe
  *
  * @returns The resolved {@link VideoEncodingDecision}.
  */
-export function resolveVideoEncoding(input: { channelBitrate: number; channelFps: number; isHighLatency: boolean; isTranscoding: boolean; requestBitrate: number;
-  requestFps: number; requestHeight: number; requestLevel: H264Level; requestProfile: H264Profile; requestWidth: number; transcodeBitrate: number;
-  transcodeHighLatencyBitrate: number; useTsb: boolean; videoCodec: string; }): VideoEncodingDecision {
+export function resolveVideoEncoding(input: { channelBitrate: number; channelFps: number; channelHeight: number; channelWidth: number; crop: boolean;
+  isHighLatency: boolean; isTranscoding: boolean; requestBitrate: number; requestFps: number; requestHeight: number; requestLevel: H264Level;
+  requestProfile: H264Profile; requestWidth: number; transcodeBitrate: number; transcodeHighLatencyBitrate: number; useTsb: boolean;
+  videoCodec: string; }): VideoEncodingDecision {
 
   // 1. Set the initial bitrate we should use for this request based on what HomeKit is requesting.
   let targetBitrate = input.requestBitrate;
@@ -184,21 +194,55 @@ export function resolveVideoEncoding(input: { channelBitrate: number; channelFps
     return { mode: "copy", targetBitrate, transmux: input.useTsb };
   }
 
+  // 4. Cap a high-latency portrait frame. See the ordered decision above. The paced rate from step 2 is unchanged.
+  const portrait = highLatencyPortraitCap(input);
+
   return {
 
     encoderOptions: {
 
       bitrate: targetBitrate,
       fps: outputFps,
-      height: input.requestHeight,
+      height: portrait?.height ?? input.requestHeight,
       idrInterval: HOMEKIT_IDR_INTERVAL,
       inputCodec: input.videoCodec,
       inputFps: input.channelFps,
       level: input.requestLevel,
       profile: input.requestProfile,
-      width: input.requestWidth
+      width: portrait?.width ?? input.requestWidth
     },
     mode: "transcode",
+    ...(portrait ? { portraitOutput: portrait } : {}),
     targetBitrate
   };
+}
+
+// The width of a frame `outputHeight` tall that keeps the source aspect ratio, rounded to a multiple of two the way the fit scaler's even-pixel rounding does.
+function evenScaledWidth(sourceWidth: number, sourceHeight: number, outputHeight: number): number {
+
+  return Math.round((sourceWidth * outputHeight) / (sourceHeight * 2)) * 2;
+}
+
+// The fit box when a high-latency portrait transcode is taller than {@link PROTECT_PORTRAIT_HIGH_LATENCY_MAX_HEIGHT}. Undefined when the request passes through.
+//
+// A local session, a landscape source, and a configured crop are not resized. The cap is the lesser of 720 and the source, so a short source is not enlarged, and a
+// request already at or under the cap is left at the size HomeKit asked for. The frame rate is not decided here.
+function highLatencyPortraitCap(input: { channelHeight: number; channelWidth: number; crop: boolean; isHighLatency: boolean;
+  requestHeight: number; }): { height: number; width: number } | undefined {
+
+  const qualifies = input.isHighLatency && !input.crop && (input.channelHeight > input.channelWidth) && (input.channelWidth > 0);
+
+  if(!qualifies) {
+
+    return undefined;
+  }
+
+  const capHeight = Math.min(PROTECT_PORTRAIT_HIGH_LATENCY_MAX_HEIGHT, input.channelHeight);
+
+  if(input.requestHeight <= capHeight) {
+
+    return undefined;
+  }
+
+  return { height: capHeight, width: evenScaledWidth(input.channelWidth, input.channelHeight, capHeight) };
 }
